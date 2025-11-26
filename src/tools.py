@@ -110,8 +110,13 @@ Analise a mensagem do usuário e o contexto atual.
    - "op da [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
    - Se o nome for composto (ex: "Joao Pedro"), extraia o nome completo.
 
+**Campos Obrigatórios para CRIAR PEDIDO:**
+Para considerar a intenção de criação como "completa" (sem missing_fields), os seguintes campos DEVEM estar presentes e válidos:
+1. **nome_cliente**
+2. **data_entrega** (Se não informado, pergunte. Se o usuário disser "hoje", use {date.today()})
+3. **pecas** (Deve ser uma lista com pelo menos 1 item. Cada item deve ter 'nome_peca' e 'quantidade')
+
 **Regras Gerais:**
-- Se o usuário disser "hoje" para datas, use {date.today()}.
 - Para 'icms', se não informado, assuma 0.
 - Para 'previsao_entrega', se não informado, assuma igual à 'data_entrega'.
 - **Para DELETAR:** Se o usuário quiser remover/excluir/deletar algo.
@@ -140,8 +145,8 @@ Retorne APENAS um JSON com a seguinte estrutura:
   "update_query": "string ou null",
   "update_fields": {{ ... }},
   "data": {{ ... objeto com todos os campos acumulados (mescle os dados novos com os do contexto) ... }},
-  "missing_fields": [ ... lista de strings com os nomes dos campos OBRIGATÓRIOS que AINDA faltam ... ],
-  "missing_message": "Pergunta curta pedindo os dados obrigatórios que faltam. Null se não faltar nada."
+  "missing_fields": [ ... lista de strings com os nomes dos campos OBRIGATÓRIOS que AINDA faltam (nome_cliente, data_entrega, pecas) ... ],
+  "missing_message": "Pergunta curta e natural pedindo os dados que faltam. Ex: 'Quais peças você deseja incluir?' ou 'Qual a data de entrega?'. Null se não faltar nada."
 }}
 """
 
