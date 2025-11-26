@@ -297,20 +297,36 @@ def chat_endpoint(req: ChatRequest):
     message = req.message
     phone = req.phone_number
     
-    # 1. Load Context
-    context = req.context or {}
-    if phone and not context:
-        # Try to fetch from DB
+    # 1. Load Context and History
+    # We want to store: { "history": [...], "state": {...} }
+    saved_context = {}
+    if phone:
         try:
             res = supabase.table("chat_sessions").select("context").eq("phone_number", phone).execute()
             if res.data:
-                context = res.data[0]["context"]
+                saved_context = res.data[0]["context"] or {}
         except:
-            pass # Fail silently and use empty context
-            
+            pass 
+
+    # Parse history and state from saved_context
+    # Handle backward compatibility where context was just the state
+    if "history" in saved_context and isinstance(saved_context["history"], list):
+        history = saved_context["history"]
+        state = saved_context.get("state", {})
+    else:
+        # Assume it was the old format (just state)
+        history = []
+        state = saved_context
+
+    # Append current user message
+    history.append({"role": "user", "content": message})
+    # Keep only last 10 messages (user + assistant)
+    history = history[-10:]
+
     # 2. Analyze Message
-    current_data = context.get("partial_data")
-    extraction = extract_data_from_message(message, current_data, req.history)
+    current_data = state.get("partial_data")
+    # Use the loaded history for extraction
+    extraction = extract_data_from_message(message, current_data, history)
     
     response_obj = None
     
@@ -345,9 +361,9 @@ def chat_endpoint(req: ChatRequest):
             target = extraction.get("delete_target")
             query = extraction.get("delete_query")
             
-            if context.get("awaiting_delete_confirmation"):
+            if state.get("awaiting_delete_confirmation"):
                 if any(k in message.lower() for k in ["sim", "s", "yes", "confirm"]):
-                    candidate = context.get("delete_candidate")
+                    candidate = state.get("delete_candidate")
                     if candidate["type"] == "order":
                         supabase.table("pecas").delete().eq("codigo_op", candidate["data"]["codigo_op"]).execute()
                         supabase.table("ordem_pedido").delete().eq("codigo_op", candidate["data"]["codigo_op"]).execute()
@@ -387,7 +403,7 @@ def chat_endpoint(req: ChatRequest):
             data = extraction.get("data")
             missing = extraction.get("missing_fields", [])
             
-            if context.get("awaiting_create_confirmation") and not missing:
+            if state.get("awaiting_create_confirmation") and not missing:
                 if any(k in message.lower() for k in ["sim", "s", "yes", "confirm"]):
                     # Create logic
                     order_payload = {k: v for k, v in data.items() if k != "pecas"}
@@ -440,15 +456,26 @@ def chat_endpoint(req: ChatRequest):
         # --- DEFAULT ---
         if not response_obj:
             msg = generate_agent_response(message, {"status": "unknown_intent", "message": "Não entendi a intenção."})
-            response_obj = ChatResponse(response=msg, new_context=context)
+            response_obj = ChatResponse(response=msg, new_context=state)
 
-    # 3. Save Context if Phone Provided
-    if phone and response_obj.new_context is not None:
-        # Upsert session
+    # 3. Save Context (History + State) if Phone Provided
+    if phone:
+        # Append assistant response to history
+        history.append({"role": "assistant", "content": response_obj.response})
+        history = history[-10:] # Keep last 10
+        
+        # Determine new state
+        new_state = response_obj.new_context if response_obj.new_context is not None else state
+        
+        final_context = {
+            "history": history,
+            "state": new_state
+        }
+
         try:
             supabase.table("chat_sessions").upsert({
                 "phone_number": phone,
-                "context": response_obj.new_context,
+                "context": final_context,
                 "updated_at": datetime.now().isoformat()
             }).execute()
         except Exception as e:

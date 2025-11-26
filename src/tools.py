@@ -94,21 +94,30 @@ def extract_data_from_message(message, current_data, history=[]):
 
     prompt = f"""
 Você é um assistente especializado em extrair dados de pedidos de produção.
-Analise a mensagem do usuário e o contexto atual.
+Analise a mensagem do usuário e o contexto atual para identificar a intenção e extrair dados.
 
 **Dados Atuais (Contexto):**
 {json.dumps(current_data, ensure_ascii=False) if current_data else "Nenhum processo em andamento."}
 
+**Histórico Recente:**
+{history_str}
+
 **Mensagem do Usuário:**
 "{message}"
 
-**Regras de Prioridade (Contexto):**
-1. **CONTINUIDADE:** Se houver 'Dados Atuais' com campos faltando (ex: criando pedido e falta 'nome_cliente'), e o usuário responder algo curto (ex: "João Pedro", "Coca Cola"), ASSUMA que ele está fornecendo o dado que falta. **NÃO** classifique como busca.
-2. **EXTRAÇÃO DE CLIENTE:**
+**Regras de Prioridade (CRÍTICO):**
+1. **CONTINUIDADE DE CONVERSA:**
+   - Olhe para o **Histórico Recente**. Se a última mensagem do assistente foi uma pergunta (ex: "Qual a data?", "Qual o cliente?", "Quais peças?"), e a resposta do usuário parece ser a resposta para essa pergunta:
+     - MANTENHA a intenção anterior (se estava criando pedido, `is_order_intent` = true).
+     - EXTRAIA o dado da resposta e MESCLE com os 'Dados Atuais'.
+     - Exemplo: Contexto tem `nome_cliente`, falta `data_entrega`. Assistente perguntou "Qual a data?". Usuário respondeu "29/12/2025".
+       -> Resultado: `is_order_intent`: true, `data`: {{ "nome_cliente": "...", "data_entrega": "2025-12-29" }}
+   - Se o usuário responder apenas com um dado solto (ex: uma data, um nome, um número) e houver campos faltando nos 'Dados Atuais', assuma que é o preenchimento desse campo.
+
+2. **EXTRAÇÃO DE CLIENTE (Nova Intenção):**
    - "crie uma op para [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
    - "pedido do [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
    - "op da [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
-   - Se o nome for composto (ex: "Joao Pedro"), extraia o nome completo.
 
 **Campos Obrigatórios para CRIAR PEDIDO:**
 Para considerar a intenção de criação como "completa" (sem missing_fields), os seguintes campos DEVEM estar presentes e válidos:
@@ -119,17 +128,8 @@ Para considerar a intenção de criação como "completa" (sem missing_fields), 
 **Regras Gerais:**
 - Para 'icms', se não informado, assuma 0.
 - Para 'previsao_entrega', se não informado, assuma igual à 'data_entrega'.
-- **Para DELETAR:** Se o usuário quiser remover/excluir/deletar algo.
-  - 'delete_target': "order" ou "part".
-  - 'delete_query': O termo identificador.
-
-- **Para EDITAR/ATUALIZAR:** Se o usuário quiser mudar/alterar/corrigir algo.
-  - 'update_target': "order" ou "part".
-  - 'update_query': O termo identificador.
-  - 'update_fields': Objeto JSON com os campos a alterar.
-
-**Histórico Recente:**
-{history_str}
+- **Para DELETAR:** 'delete_target' ("order"/"part"), 'delete_query'.
+- **Para EDITAR:** 'update_target', 'update_query', 'update_fields'.
 
 **Saída JSON:**
 Retorne APENAS um JSON com a seguinte estrutura:
@@ -145,8 +145,8 @@ Retorne APENAS um JSON com a seguinte estrutura:
   "update_query": "string ou null",
   "update_fields": {{ ... }},
   "data": {{ ... objeto com todos os campos acumulados (mescle os dados novos com os do contexto) ... }},
-  "missing_fields": [ ... lista de strings com os nomes dos campos OBRIGATÓRIOS que AINDA faltam (nome_cliente, data_entrega, pecas) ... ],
-  "missing_message": "Pergunta curta e natural pedindo os dados que faltam. Ex: 'Quais peças você deseja incluir?' ou 'Qual a data de entrega?'. Null se não faltar nada."
+  "missing_fields": [ ... lista de strings com os nomes dos campos OBRIGATÓRIOS que AINDA faltam ... ],
+  "missing_message": "Pergunta curta e natural pedindo os dados que faltam. Null se não faltar nada."
 }}
 """
 
