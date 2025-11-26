@@ -3,8 +3,5 @@ uvicorn
 pydantic
 supabase
 python-dotenv
-streamlit
-pypdf
 requests
 httpx
-openai
