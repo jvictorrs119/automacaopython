@@ -7,7 +7,6 @@ import random
 import string
 
 from src.models import OrderCreate, PartsListCreate, OrdemPedido, Peca, AlertaAtraso
-from src.models import OrderCreate, PartsListCreate, OrdemPedido, Peca, AlertaAtraso
 from src.database import get_supabase
 import os
 import requests

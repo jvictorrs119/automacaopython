@@ -11,7 +11,11 @@ load_dotenv()
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+def get_openai_client():
+    if not OPENAI_API_KEY:
+        print("Warning: OPENAI_API_KEY not found.")
+        return None
+    return OpenAI(api_key=OPENAI_API_KEY)
 
 def extract_text_from_pdf(uploaded_file):
     """Extract text from PDF file"""
@@ -48,6 +52,9 @@ Se alguma informação não estiver disponível, use valores padrão razoáveis 
 **IMPORTANTE:** Retorne APENAS o JSON válido, sem markdown, sem explicações, apenas o objeto JSON puro."""
 
     try:
+        client = get_openai_client()
+        if not client: return None
+        
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -137,6 +144,9 @@ Retorne APENAS um JSON com a seguinte estrutura:
 """
 
     try:
+        client = get_openai_client()
+        if not client: return None
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -173,6 +183,9 @@ Retorne JSON:
 Se não encontrar peças, retorne lista vazia.
 """
     try:
+        client = get_openai_client()
+        if not client: return []
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
@@ -182,6 +195,9 @@ Se não encontrar peças, retorne lista vazia.
         if result.startswith("```"): result = result.split("```")[1]
         if result.startswith("json"): result = result[4:]
         return json.loads(result).get("pecas", [])
+    except:
+        return []
+
 def generate_agent_response(user_message, action_result, context_data=None):
     """
     Generates a natural language response for the user based on the action result.
@@ -212,6 +228,9 @@ def generate_agent_response(user_message, action_result, context_data=None):
     """
     
     try:
+        client = get_openai_client()
+        if not client: return "Desculpe, serviço de IA indisponível."
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
