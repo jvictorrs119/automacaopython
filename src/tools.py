@@ -182,8 +182,44 @@ Se não encontrar peças, retorne lista vazia.
         if result.startswith("```"): result = result.split("```")[1]
         if result.startswith("json"): result = result[4:]
         return json.loads(result).get("pecas", [])
-    except:
-        return []
+def generate_agent_response(user_message, action_result, context_data=None):
+    """
+    Generates a natural language response for the user based on the action result.
+    This ensures the agent follows the persona and instructions.
+    """
+    
+    prompt = f"""
+    Você é um assistente de produção industrial inteligente e prestativo.
+    Seu objetivo é ajudar o usuário a gerenciar pedidos e peças.
+    
+    **Mensagem do Usuário:** "{user_message}"
+    
+    **Resultado da Ação (Sistema):**
+    {json.dumps(action_result, ensure_ascii=False, indent=2)}
+    
+    **Contexto Atual:**
+    {json.dumps(context_data, ensure_ascii=False, indent=2) if context_data else "Nenhum"}
+    
+    **Instruções:**
+    1. Responda de forma natural, amigável e profissional.
+    2. Use emojis para tornar a mensagem visualmente agradável (🏭, ✅, ⚠️, 📦, etc).
+    3. Se o resultado for uma lista de itens (busca), formate-os de forma clara (ex: bullet points).
+    4. Se o sistema pedir confirmação (ex: "awaiting_confirmation"), pergunte ao usuário claramente.
+    5. Se houve erro, explique de forma simples.
+    6. NÃO invente dados que não estão no resultado.
+    
+    Gere APENAS o texto da resposta.
+    """
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return "Desculpe, não consegui gerar uma resposta agora."
 
 def fetch_alerts():
     """Fetch alerts from API"""

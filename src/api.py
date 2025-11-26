@@ -19,7 +19,8 @@ from src.tools import (
     extract_data_from_message,
     extract_parts_from_message,
     extract_text_from_pdf,
-    extract_data_with_ai
+    extract_data_with_ai,
+    generate_agent_response
 )
 
 app = FastAPI(title="Production Monitoring API")
@@ -325,19 +326,18 @@ def chat_endpoint(req: ChatRequest):
         parts = parts_res.data
         
         if not orders and not parts:
-            return ChatResponse(response=f"Não encontrei nada com '{query}'.")
+            msg = generate_agent_response(message, {"status": "not_found", "query": query})
+            return ChatResponse(response=msg)
             
-        msg = f"🔎 **Resultados para '{query}':**\n\n"
-        
-        if orders:
-            msg += "**📋 Pedidos:**\n"
-            for o in orders:
-                msg += f"- **OP:** {o['codigo_op']} | **Cliente:** {o['nome_cliente']} | **Status:** {o['status']}\n"
-        
-        if parts:
-            msg += "\n**📦 Peças:**\n"
-            for p in parts:
-                msg += f"- **Peça:** {p['nome_peca']} | **OP:** {p['codigo_op']} | **Status:** {p['status']}\n"
+        # Let the AI format the search results
+        action_result = {
+            "status": "success",
+            "type": "search_results",
+            "query": query,
+            "orders": orders,
+            "parts": parts
+        }
+        msg = generate_agent_response(message, action_result)
                 
         return ChatResponse(response=msg, action="search_result", data={"orders": orders, "parts": parts})
 
@@ -357,9 +357,11 @@ def chat_endpoint(req: ChatRequest):
                 else:
                     supabase.table("pecas").delete().eq("id_peca", candidate["data"]["id_peca"]).execute()
                 
-                return ChatResponse(response="✅ Item deletado com sucesso!", new_context={})
+                msg = generate_agent_response(message, {"status": "success", "type": "delete", "item": candidate})
+                return ChatResponse(response=msg, new_context={})
             else:
-                return ChatResponse(response="Operação cancelada.", new_context={})
+                msg = generate_agent_response(message, {"status": "cancelled", "type": "delete"})
+                return ChatResponse(response=msg, new_context={})
 
         # Search for item to delete
         orders = []
@@ -372,21 +374,31 @@ def chat_endpoint(req: ChatRequest):
         total = len(orders) + len(parts)
         
         if total == 0:
-            return ChatResponse(response=f"Não encontrei '{query}' para deletar.")
+            msg = generate_agent_response(message, {"status": "not_found", "query": query, "action": "delete"})
+            return ChatResponse(response=msg)
         elif total == 1:
             item = orders[0] if orders else parts[0]
             item_type = "order" if orders else "part"
-            desc = f"Pedido {item['codigo_op']}" if orders else f"Peça {item['nome_peca']}"
+            
+            action_result = {
+                "status": "confirmation_needed",
+                "action": "delete",
+                "item": item,
+                "item_type": item_type
+            }
+            
+            msg = generate_agent_response(message, action_result)
             
             return ChatResponse(
-                response=f"⚠️ **Confirmar exclusão de {desc}?** Responda 'Sim' para confirmar.",
+                response=msg,
                 new_context={
                     "awaiting_delete_confirmation": True,
                     "delete_candidate": {"type": item_type, "data": item}
                 }
             )
         else:
-            return ChatResponse(response=f"Encontrei {total} itens. Seja mais específico (use o código exato).")
+            msg = generate_agent_response(message, {"status": "multiple_found", "count": total, "query": query})
+            return ChatResponse(response=msg)
 
     # --- CREATE ORDER INTENT ---
     elif extraction.get("is_order_intent"):
@@ -426,24 +438,30 @@ def chat_endpoint(req: ChatRequest):
                 # Trigger n8n
                 trigger_n8n_webhook({"event": "new_order", "codigo_op": codigo_op, "data": order_payload})
                 
+                action_result = {
+                    "status": "success",
+                    "action": "create_order",
+                    "codigo_op": codigo_op,
+                    "parts_count": created_parts_count
+                }
+                msg = generate_agent_response(message, action_result)
+                
                 return ChatResponse(
-                    response=f"✅ **Ordem {codigo_op} criada com sucesso!** ({created_parts_count} peças cadastradas).",
+                    response=msg,
                     new_context={}
                 )
             elif any(k in message.lower() for k in ["não", "nao", "cancel"]):
-                return ChatResponse(response="Criação cancelada.", new_context={})
+                msg = generate_agent_response(message, {"status": "cancelled", "action": "create_order"})
+                return ChatResponse(response=msg, new_context={})
 
         if not missing:
             # All data present, ask for confirmation
-            msg = f"""📝 **Confirmar Pedido?**
-            
-- Cliente: {data.get('nome_cliente')}
-- Pedido: {data.get('numero_pedido')}
-- Entrega: {data.get('data_entrega')}
-- Valor: R$ {data.get('preco_total')}
-- Peças: {len(data.get('pecas', []))}
-
-Responda 'Sim' para criar."""
+            action_result = {
+                "status": "confirmation_needed",
+                "action": "create_order",
+                "data": data
+            }
+            msg = generate_agent_response(message, action_result)
             
             return ChatResponse(
                 response=msg,
@@ -454,14 +472,27 @@ Responda 'Sim' para criar."""
             )
         else:
             # Missing data
-            question = extraction.get("missing_message") or f"Faltam dados: {', '.join(missing)}. Poderia informar?"
+            # Use the missing_message from extraction if available, otherwise ask AI to generate
+            if extraction.get("missing_message"):
+                return ChatResponse(
+                    response=extraction.get("missing_message"),
+                    new_context={"partial_data": data}
+                )
+            
+            action_result = {
+                "status": "missing_data",
+                "missing_fields": missing,
+                "current_data": data
+            }
+            msg = generate_agent_response(message, action_result)
             return ChatResponse(
-                response=question,
+                response=msg,
                 new_context={"partial_data": data}
             )
 
     # --- DEFAULT / FALLBACK ---
+    msg = generate_agent_response(message, {"status": "unknown_intent", "message": "Não entendi a intenção."})
     return ChatResponse(
-        response="Não entendi. Você quer criar um pedido, buscar algo ou ver alertas?",
+        response=msg,
         new_context=context
     )
