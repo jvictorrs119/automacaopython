@@ -7,11 +7,33 @@ import random
 import string
 
 from src.models import OrderCreate, PartsListCreate, OrdemPedido, Peca, AlertaAtraso
+from src.models import OrderCreate, PartsListCreate, OrdemPedido, Peca, AlertaAtraso
 from src.database import get_supabase
 import os
 import requests
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+
+# Import tools for the agent logic
+from src.tools import (
+    extract_data_from_message,
+    extract_parts_from_message,
+    extract_text_from_pdf,
+    extract_data_with_ai
+)
 
 app = FastAPI(title="Production Monitoring API")
+
+class ChatRequest(BaseModel):
+    message: str
+    history: List[dict] = [] # [{"role": "user", "content": "..."}, ...]
+    context: Optional[Dict[str, Any]] = None # To pass state back and forth if needed
+
+class ChatResponse(BaseModel):
+    response: str
+    action: Optional[str] = None # "create_order", "search", etc.
+    data: Optional[Dict[str, Any]] = None # Data associated with the action
+    new_context: Optional[Dict[str, Any]] = None # Updated context to be sent back in next request
 
 def trigger_n8n_webhook(data: dict):
     """Send data to n8n webhook if URL is configured"""
@@ -81,15 +103,6 @@ def create_parts(parts_list: PartsListCreate):
             parts_data.append(part_dict)
             
         response = supabase.table("pecas").insert(parts_data).execute()
-        
-        # Trigger n8n automation for parts
-        trigger_n8n_webhook({
-            "event": "new_parts",
-            "codigo_op": parts_list.codigo_op,
-            "count": len(parts_data),
-            "parts": parts_data
-        })
-
         return {"message": f"Created {len(parts_data)} parts for {parts_list.codigo_op}"}
         
     except Exception as e:
@@ -270,3 +283,185 @@ def delete_part(part_id: str):
         return {"message": "Part deleted successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# --- Agent Chat Endpoint ---
+
+@app.post("/chat", response_model=ChatResponse)
+def chat_endpoint(req: ChatRequest):
+    """
+    Intelligent endpoint that processes user messages, identifies intents,
+    and executes actions (Search, Create, Update, Delete).
+    Designed to work with n8n.
+    """
+    supabase = get_supabase()
+    message = req.message
+    history = req.history
+    context = req.context or {}
+    
+    # 1. Analyze the message using the AI tool
+    # We pass the current context data if we are in the middle of a flow
+    current_data = context.get("partial_data")
+    
+    extraction = extract_data_from_message(message, current_data, history)
+    
+    if not extraction:
+        return ChatResponse(response="Desculpe, tive um erro interno ao processar sua mensagem.")
+
+    # 2. Handle Intents
+    
+    # --- SEARCH INTENT ---
+    if extraction.get("is_search_intent"):
+        query = extraction.get("search_query")
+        if not query:
+            return ChatResponse(response="O que você deseja buscar?")
+            
+        # Perform search (logic adapted from streamlit app)
+        # Search Orders
+        orders_res = supabase.table("ordem_pedido").select("*").or_(f"nome_cliente.ilike.%{query}%,codigo_op.ilike.%{query}%,status.ilike.%{query}%").execute()
+        orders = orders_res.data
+        
+        # Search Parts
+        parts_res = supabase.table("pecas").select("*").or_(f"nome_peca.ilike.%{query}%,nome_cliente.ilike.%{query}%,codigo_op.ilike.%{query}%,status.ilike.%{query}%").execute()
+        parts = parts_res.data
+        
+        if not orders and not parts:
+            return ChatResponse(response=f"Não encontrei nada com '{query}'.")
+            
+        msg = f"🔎 **Resultados para '{query}':**\n\n"
+        
+        if orders:
+            msg += "**📋 Pedidos:**\n"
+            for o in orders:
+                msg += f"- **OP:** {o['codigo_op']} | **Cliente:** {o['nome_cliente']} | **Status:** {o['status']}\n"
+        
+        if parts:
+            msg += "\n**📦 Peças:**\n"
+            for p in parts:
+                msg += f"- **Peça:** {p['nome_peca']} | **OP:** {p['codigo_op']} | **Status:** {p['status']}\n"
+                
+        return ChatResponse(response=msg, action="search_result", data={"orders": orders, "parts": parts})
+
+    # --- DELETE INTENT ---
+    elif extraction.get("is_delete_intent"):
+        target = extraction.get("delete_target")
+        query = extraction.get("delete_query")
+        
+        # Check if we are confirming a deletion
+        if context.get("awaiting_delete_confirmation"):
+            if any(k in message.lower() for k in ["sim", "s", "yes", "confirm"]):
+                candidate = context.get("delete_candidate")
+                if candidate["type"] == "order":
+                    # Delete parts first
+                    supabase.table("pecas").delete().eq("codigo_op", candidate["data"]["codigo_op"]).execute()
+                    supabase.table("ordem_pedido").delete().eq("codigo_op", candidate["data"]["codigo_op"]).execute()
+                else:
+                    supabase.table("pecas").delete().eq("id_peca", candidate["data"]["id_peca"]).execute()
+                
+                return ChatResponse(response="✅ Item deletado com sucesso!", new_context={})
+            else:
+                return ChatResponse(response="Operação cancelada.", new_context={})
+
+        # Search for item to delete
+        orders = []
+        parts = []
+        if target in ["order", "any"]:
+            orders = supabase.table("ordem_pedido").select("*").or_(f"codigo_op.eq.{query},nome_cliente.ilike.%{query}%").execute().data
+        if target in ["part", "any"]:
+            parts = supabase.table("pecas").select("*").or_(f"nome_peca.ilike.%{query}%,id_peca.eq.{query}").execute().data
+            
+        total = len(orders) + len(parts)
+        
+        if total == 0:
+            return ChatResponse(response=f"Não encontrei '{query}' para deletar.")
+        elif total == 1:
+            item = orders[0] if orders else parts[0]
+            item_type = "order" if orders else "part"
+            desc = f"Pedido {item['codigo_op']}" if orders else f"Peça {item['nome_peca']}"
+            
+            return ChatResponse(
+                response=f"⚠️ **Confirmar exclusão de {desc}?** Responda 'Sim' para confirmar.",
+                new_context={
+                    "awaiting_delete_confirmation": True,
+                    "delete_candidate": {"type": item_type, "data": item}
+                }
+            )
+        else:
+            return ChatResponse(response=f"Encontrei {total} itens. Seja mais específico (use o código exato).")
+
+    # --- CREATE ORDER INTENT ---
+    elif extraction.get("is_order_intent"):
+        data = extraction.get("data")
+        missing = extraction.get("missing_fields", [])
+        
+        # Check if user is confirming creation
+        if context.get("awaiting_create_confirmation") and not missing:
+            if any(k in message.lower() for k in ["sim", "s", "yes", "confirm"]):
+                # Create Order
+                order_payload = {k: v for k, v in data.items() if k != "pecas"}
+                
+                # Generate OP code
+                codigo_op = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+                order_payload["codigo_op"] = codigo_op
+                order_payload["status"] = "Em Produção"
+                if not order_payload.get("previsao_entrega"):
+                    order_payload["previsao_entrega"] = order_payload["data_entrega"]
+                
+                supabase.table("ordem_pedido").insert(order_payload).execute()
+                
+                # Create Parts
+                created_parts_count = 0
+                if "pecas" in data and data["pecas"]:
+                    parts_payload = []
+                    for p in data["pecas"]:
+                        p["codigo_op"] = codigo_op
+                        p["status"] = "Pendente"
+                        p["nome_cliente"] = order_payload["nome_cliente"]
+                        p["data_entrega"] = order_payload["data_entrega"]
+                        p["pecas_produzidas"] = 0
+                        parts_payload.append(p)
+                    
+                    supabase.table("pecas").insert(parts_payload).execute()
+                    created_parts_count = len(parts_payload)
+                
+                # Trigger n8n
+                trigger_n8n_webhook({"event": "new_order", "codigo_op": codigo_op, "data": order_payload})
+                
+                return ChatResponse(
+                    response=f"✅ **Ordem {codigo_op} criada com sucesso!** ({created_parts_count} peças cadastradas).",
+                    new_context={}
+                )
+            elif any(k in message.lower() for k in ["não", "nao", "cancel"]):
+                return ChatResponse(response="Criação cancelada.", new_context={})
+
+        if not missing:
+            # All data present, ask for confirmation
+            msg = f"""📝 **Confirmar Pedido?**
+            
+- Cliente: {data.get('nome_cliente')}
+- Pedido: {data.get('numero_pedido')}
+- Entrega: {data.get('data_entrega')}
+- Valor: R$ {data.get('preco_total')}
+- Peças: {len(data.get('pecas', []))}
+
+Responda 'Sim' para criar."""
+            
+            return ChatResponse(
+                response=msg,
+                new_context={
+                    "awaiting_create_confirmation": True,
+                    "partial_data": data
+                }
+            )
+        else:
+            # Missing data
+            question = extraction.get("missing_message") or f"Faltam dados: {', '.join(missing)}. Poderia informar?"
+            return ChatResponse(
+                response=question,
+                new_context={"partial_data": data}
+            )
+
+    # --- DEFAULT / FALLBACK ---
+    return ChatResponse(
+        response="Não entendi. Você quer criar um pedido, buscar algo ou ver alertas?",
+        new_context=context
+    )
