@@ -27,14 +27,15 @@ app = FastAPI(title="Production Monitoring API")
 
 class ChatRequest(BaseModel):
     message: str
-    history: List[dict] = [] # [{"role": "user", "content": "..."}, ...]
-    context: Optional[Dict[str, Any]] = None # To pass state back and forth if needed
+    phone_number: Optional[str] = None # Identifier for the session
+    history: List[dict] = [] 
+    context: Optional[Dict[str, Any]] = None 
 
 class ChatResponse(BaseModel):
     response: str
-    action: Optional[str] = None # "create_order", "search", etc.
-    data: Optional[Dict[str, Any]] = None # Data associated with the action
-    new_context: Optional[Dict[str, Any]] = None # Updated context to be sent back in next request
+    action: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
+    new_context: Optional[Dict[str, Any]] = None
 
 def trigger_n8n_webhook(data: dict):
     """Send data to n8n webhook if URL is configured"""
@@ -290,209 +291,168 @@ def delete_part(part_id: str):
 @app.post("/chat", response_model=ChatResponse)
 def chat_endpoint(req: ChatRequest):
     """
-    Intelligent endpoint that processes user messages, identifies intents,
-    and executes actions (Search, Create, Update, Delete).
-    Designed to work with n8n.
+    Intelligent endpoint that processes user messages.
+    If 'phone_number' is provided, it automatically manages context in the DB.
     """
     supabase = get_supabase()
     message = req.message
-    history = req.history
+    phone = req.phone_number
+    
+    # 1. Load Context
     context = req.context or {}
-    
-    # 1. Analyze the message using the AI tool
-    # We pass the current context data if we are in the middle of a flow
+    if phone and not context:
+        # Try to fetch from DB
+        try:
+            res = supabase.table("chat_sessions").select("context").eq("phone_number", phone).execute()
+            if res.data:
+                context = res.data[0]["context"]
+        except:
+            pass # Fail silently and use empty context
+            
+    # 2. Analyze Message
     current_data = context.get("partial_data")
+    extraction = extract_data_from_message(message, current_data, req.history)
     
-    extraction = extract_data_from_message(message, current_data, history)
+    response_obj = None
     
     if not extraction:
-        return ChatResponse(response="Desculpe, tive um erro interno ao processar sua mensagem.")
-
-    # 2. Handle Intents
-    
-    # --- SEARCH INTENT ---
-    if extraction.get("is_search_intent"):
-        query = extraction.get("search_query")
-        if not query:
-            return ChatResponse(response="O que você deseja buscar?")
-            
-        # Perform search (logic adapted from streamlit app)
-        # Search Orders
-        orders_res = supabase.table("ordem_pedido").select("*").or_(f"nome_cliente.ilike.%{query}%,codigo_op.ilike.%{query}%,status.ilike.%{query}%").execute()
-        orders = orders_res.data
+        response_obj = ChatResponse(response="Desculpe, tive um erro interno.")
+    else:
+        # ... (Logic for intents - simplified for brevity, we keep the existing logic structure but wrap the return)
+        # We need to capture the result to save context before returning
         
-        # Search Parts
-        parts_res = supabase.table("pecas").select("*").or_(f"nome_peca.ilike.%{query}%,nome_cliente.ilike.%{query}%,codigo_op.ilike.%{query}%,status.ilike.%{query}%").execute()
-        parts = parts_res.data
-        
-        if not orders and not parts:
-            msg = generate_agent_response(message, {"status": "not_found", "query": query})
-            return ChatResponse(response=msg)
-            
-        # Let the AI format the search results
-        action_result = {
-            "status": "success",
-            "type": "search_results",
-            "query": query,
-            "orders": orders,
-            "parts": parts
-        }
-        msg = generate_agent_response(message, action_result)
-                
-        return ChatResponse(response=msg, action="search_result", data={"orders": orders, "parts": parts})
-
-    # --- DELETE INTENT ---
-    elif extraction.get("is_delete_intent"):
-        target = extraction.get("delete_target")
-        query = extraction.get("delete_query")
-        
-        # Check if we are confirming a deletion
-        if context.get("awaiting_delete_confirmation"):
-            if any(k in message.lower() for k in ["sim", "s", "yes", "confirm"]):
-                candidate = context.get("delete_candidate")
-                if candidate["type"] == "order":
-                    # Delete parts first
-                    supabase.table("pecas").delete().eq("codigo_op", candidate["data"]["codigo_op"]).execute()
-                    supabase.table("ordem_pedido").delete().eq("codigo_op", candidate["data"]["codigo_op"]).execute()
-                else:
-                    supabase.table("pecas").delete().eq("id_peca", candidate["data"]["id_peca"]).execute()
-                
-                msg = generate_agent_response(message, {"status": "success", "type": "delete", "item": candidate})
-                return ChatResponse(response=msg, new_context={})
+        # --- SEARCH INTENT ---
+        if extraction.get("is_search_intent"):
+            query = extraction.get("search_query")
+            if not query:
+                response_obj = ChatResponse(response="O que você deseja buscar?")
             else:
-                msg = generate_agent_response(message, {"status": "cancelled", "type": "delete"})
-                return ChatResponse(response=msg, new_context={})
+                orders_res = supabase.table("ordem_pedido").select("*").or_(f"nome_cliente.ilike.%{query}%,codigo_op.ilike.%{query}%,status.ilike.%{query}%").execute()
+                parts_res = supabase.table("pecas").select("*").or_(f"nome_peca.ilike.%{query}%,nome_cliente.ilike.%{query}%,codigo_op.ilike.%{query}%,status.ilike.%{query}%").execute()
+                
+                orders = orders_res.data
+                parts = parts_res.data
+                
+                if not orders and not parts:
+                    msg = generate_agent_response(message, {"status": "not_found", "query": query})
+                    response_obj = ChatResponse(response=msg)
+                else:
+                    action_result = {"status": "success", "type": "search_results", "query": query, "orders": orders, "parts": parts}
+                    msg = generate_agent_response(message, action_result)
+                    response_obj = ChatResponse(response=msg, action="search_result", data={"orders": orders, "parts": parts})
 
-        # Search for item to delete
-        orders = []
-        parts = []
-        if target in ["order", "any"]:
-            orders = supabase.table("ordem_pedido").select("*").or_(f"codigo_op.eq.{query},nome_cliente.ilike.%{query}%").execute().data
-        if target in ["part", "any"]:
-            parts = supabase.table("pecas").select("*").or_(f"nome_peca.ilike.%{query}%,id_peca.eq.{query}").execute().data
+        # --- DELETE INTENT ---
+        elif extraction.get("is_delete_intent"):
+            target = extraction.get("delete_target")
+            query = extraction.get("delete_query")
             
-        total = len(orders) + len(parts)
-        
-        if total == 0:
-            msg = generate_agent_response(message, {"status": "not_found", "query": query, "action": "delete"})
-            return ChatResponse(response=msg)
-        elif total == 1:
-            item = orders[0] if orders else parts[0]
-            item_type = "order" if orders else "part"
-            
-            action_result = {
-                "status": "confirmation_needed",
-                "action": "delete",
-                "item": item,
-                "item_type": item_type
-            }
-            
-            msg = generate_agent_response(message, action_result)
-            
-            return ChatResponse(
-                response=msg,
-                new_context={
-                    "awaiting_delete_confirmation": True,
-                    "delete_candidate": {"type": item_type, "data": item}
-                }
-            )
-        else:
-            msg = generate_agent_response(message, {"status": "multiple_found", "count": total, "query": query})
-            return ChatResponse(response=msg)
-
-    # --- CREATE ORDER INTENT ---
-    elif extraction.get("is_order_intent"):
-        data = extraction.get("data")
-        missing = extraction.get("missing_fields", [])
-        
-        # Check if user is confirming creation
-        if context.get("awaiting_create_confirmation") and not missing:
-            if any(k in message.lower() for k in ["sim", "s", "yes", "confirm"]):
-                # Create Order
-                order_payload = {k: v for k, v in data.items() if k != "pecas"}
-                
-                # Generate OP code
-                codigo_op = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-                order_payload["codigo_op"] = codigo_op
-                order_payload["status"] = "Em Produção"
-                if not order_payload.get("previsao_entrega"):
-                    order_payload["previsao_entrega"] = order_payload["data_entrega"]
-                
-                supabase.table("ordem_pedido").insert(order_payload).execute()
-                
-                # Create Parts
-                created_parts_count = 0
-                if "pecas" in data and data["pecas"]:
-                    parts_payload = []
-                    for p in data["pecas"]:
-                        p["codigo_op"] = codigo_op
-                        p["status"] = "Pendente"
-                        p["nome_cliente"] = order_payload["nome_cliente"]
-                        p["data_entrega"] = order_payload["data_entrega"]
-                        p["pecas_produzidas"] = 0
-                        parts_payload.append(p)
+            if context.get("awaiting_delete_confirmation"):
+                if any(k in message.lower() for k in ["sim", "s", "yes", "confirm"]):
+                    candidate = context.get("delete_candidate")
+                    if candidate["type"] == "order":
+                        supabase.table("pecas").delete().eq("codigo_op", candidate["data"]["codigo_op"]).execute()
+                        supabase.table("ordem_pedido").delete().eq("codigo_op", candidate["data"]["codigo_op"]).execute()
+                    else:
+                        supabase.table("pecas").delete().eq("id_peca", candidate["data"]["id_peca"]).execute()
                     
-                    supabase.table("pecas").insert(parts_payload).execute()
-                    created_parts_count = len(parts_payload)
+                    msg = generate_agent_response(message, {"status": "success", "type": "delete", "item": candidate})
+                    response_obj = ChatResponse(response=msg, new_context={})
+                else:
+                    msg = generate_agent_response(message, {"status": "cancelled", "type": "delete"})
+                    response_obj = ChatResponse(response=msg, new_context={})
+            else:
+                # Search logic for delete
+                orders = []
+                parts = []
+                if target in ["order", "any"]:
+                    orders = supabase.table("ordem_pedido").select("*").or_(f"codigo_op.eq.{query},nome_cliente.ilike.%{query}%").execute().data
+                if target in ["part", "any"]:
+                    parts = supabase.table("pecas").select("*").or_(f"nome_peca.ilike.%{query}%,id_peca.eq.{query}").execute().data
                 
-                # Trigger n8n
-                trigger_n8n_webhook({"event": "new_order", "codigo_op": codigo_op, "data": order_payload})
-                
-                action_result = {
-                    "status": "success",
-                    "action": "create_order",
-                    "codigo_op": codigo_op,
-                    "parts_count": created_parts_count
-                }
-                msg = generate_agent_response(message, action_result)
-                
-                return ChatResponse(
-                    response=msg,
-                    new_context={}
-                )
-            elif any(k in message.lower() for k in ["não", "nao", "cancel"]):
-                msg = generate_agent_response(message, {"status": "cancelled", "action": "create_order"})
-                return ChatResponse(response=msg, new_context={})
+                total = len(orders) + len(parts)
+                if total == 1:
+                    item = orders[0] if orders else parts[0]
+                    item_type = "order" if orders else "part"
+                    action_result = {"status": "confirmation_needed", "action": "delete", "item": item, "item_type": item_type}
+                    msg = generate_agent_response(message, action_result)
+                    response_obj = ChatResponse(response=msg, new_context={"awaiting_delete_confirmation": True, "delete_candidate": {"type": item_type, "data": item}})
+                elif total == 0:
+                    msg = generate_agent_response(message, {"status": "not_found", "query": query, "action": "delete"})
+                    response_obj = ChatResponse(response=msg)
+                else:
+                    msg = generate_agent_response(message, {"status": "multiple_found", "count": total, "query": query})
+                    response_obj = ChatResponse(response=msg)
 
-        if not missing:
-            # All data present, ask for confirmation
-            action_result = {
-                "status": "confirmation_needed",
-                "action": "create_order",
-                "data": data
-            }
-            msg = generate_agent_response(message, action_result)
+        # --- CREATE ORDER INTENT ---
+        elif extraction.get("is_order_intent"):
+            data = extraction.get("data")
+            missing = extraction.get("missing_fields", [])
             
-            return ChatResponse(
-                response=msg,
-                new_context={
-                    "awaiting_create_confirmation": True,
-                    "partial_data": data
-                }
-            )
-        else:
-            # Missing data
-            # Use the missing_message from extraction if available, otherwise ask AI to generate
-            if extraction.get("missing_message"):
-                return ChatResponse(
-                    response=extraction.get("missing_message"),
-                    new_context={"partial_data": data}
-                )
-            
-            action_result = {
-                "status": "missing_data",
-                "missing_fields": missing,
-                "current_data": data
-            }
-            msg = generate_agent_response(message, action_result)
-            return ChatResponse(
-                response=msg,
-                new_context={"partial_data": data}
-            )
+            if context.get("awaiting_create_confirmation") and not missing:
+                if any(k in message.lower() for k in ["sim", "s", "yes", "confirm"]):
+                    # Create logic
+                    order_payload = {k: v for k, v in data.items() if k != "pecas"}
+                    codigo_op = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+                    order_payload["codigo_op"] = codigo_op
+                    order_payload["status"] = "Em Produção"
+                    if not order_payload.get("previsao_entrega"): order_payload["previsao_entrega"] = order_payload["data_entrega"]
+                    
+                    supabase.table("ordem_pedido").insert(order_payload).execute()
+                    
+                    created_parts_count = 0
+                    if "pecas" in data and data["pecas"]:
+                        parts_payload = []
+                        for p in data["pecas"]:
+                            p["codigo_op"] = codigo_op
+                            p["status"] = "Pendente"
+                            p["nome_cliente"] = order_payload["nome_cliente"]
+                            p["data_entrega"] = order_payload["data_entrega"]
+                            p["pecas_produzidas"] = 0
+                            parts_payload.append(p)
+                        supabase.table("pecas").insert(parts_payload).execute()
+                        created_parts_count = len(parts_payload)
+                    
+                    trigger_n8n_webhook({"event": "new_order", "codigo_op": codigo_op, "data": order_payload})
+                    
+                    action_result = {"status": "success", "action": "create_order", "codigo_op": codigo_op, "parts_count": created_parts_count}
+                    msg = generate_agent_response(message, action_result)
+                    response_obj = ChatResponse(response=msg, new_context={})
+                elif any(k in message.lower() for k in ["não", "nao", "cancel"]):
+                    msg = generate_agent_response(message, {"status": "cancelled", "action": "create_order"})
+                    response_obj = ChatResponse(response=msg, new_context={})
+                else:
+                     # Re-ask confirmation if ambiguous? Or treat as no? Let's assume re-ask or default fallback.
+                     # For now, let's just fall through to default.
+                     pass
 
-    # --- DEFAULT / FALLBACK ---
-    msg = generate_agent_response(message, {"status": "unknown_intent", "message": "Não entendi a intenção."})
-    return ChatResponse(
-        response=msg,
-        new_context=context
-    )
+            if not response_obj:
+                if not missing:
+                    action_result = {"status": "confirmation_needed", "action": "create_order", "data": data}
+                    msg = generate_agent_response(message, action_result)
+                    response_obj = ChatResponse(response=msg, new_context={"awaiting_create_confirmation": True, "partial_data": data})
+                else:
+                    if extraction.get("missing_message"):
+                        response_obj = ChatResponse(response=extraction.get("missing_message"), new_context={"partial_data": data})
+                    else:
+                        action_result = {"status": "missing_data", "missing_fields": missing, "current_data": data}
+                        msg = generate_agent_response(message, action_result)
+                        response_obj = ChatResponse(response=msg, new_context={"partial_data": data})
+
+        # --- DEFAULT ---
+        if not response_obj:
+            msg = generate_agent_response(message, {"status": "unknown_intent", "message": "Não entendi a intenção."})
+            response_obj = ChatResponse(response=msg, new_context=context)
+
+    # 3. Save Context if Phone Provided
+    if phone and response_obj.new_context is not None:
+        # Upsert session
+        try:
+            supabase.table("chat_sessions").upsert({
+                "phone_number": phone,
+                "context": response_obj.new_context,
+                "updated_at": datetime.now().isoformat()
+            }).execute()
+        except Exception as e:
+            print(f"Failed to save context: {e}")
+            
+    return response_obj
