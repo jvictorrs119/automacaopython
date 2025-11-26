@@ -81,6 +81,15 @@ def create_parts(parts_list: PartsListCreate):
             parts_data.append(part_dict)
             
         response = supabase.table("pecas").insert(parts_data).execute()
+        
+        # Trigger n8n automation for parts
+        trigger_n8n_webhook({
+            "event": "new_parts",
+            "codigo_op": parts_list.codigo_op,
+            "count": len(parts_data),
+            "parts": parts_data
+        })
+
         return {"message": f"Created {len(parts_data)} parts for {parts_list.codigo_op}"}
         
     except Exception as e:
