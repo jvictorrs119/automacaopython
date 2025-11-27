@@ -404,6 +404,88 @@ def chat_endpoint(req: ChatRequest):
         # --- CREATE ORDER INTENT ---
         elif extraction.get("is_order_intent"):
             supabase = get_supabase()
+            data = extraction.get("data")
+            missing = extraction.get("missing_fields", [])
+            
+            if state.get("awaiting_create_confirmation") and not missing:
+                if any(k in message.lower() for k in ["sim", "s", "yes", "confirm"]):
+                    # Create logic (Order Only)
+                    order_payload = {k: v for k, v in data.items() if k != "pecas"}
+                    codigo_op = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+                    order_payload["codigo_op"] = codigo_op
+                    order_payload["status"] = "Em Produção"
+                    if not order_payload.get("previsao_entrega"): order_payload["previsao_entrega"] = order_payload["data_entrega"]
+                    
+                    supabase.table("ordem_pedido").insert(order_payload).execute()
+                    
+                    # Trigger n8n
+                    trigger_n8n_webhook({"event": "new_order", "codigo_op": codigo_op, "data": order_payload})
+                    
+                    action_result = {"status": "success", "action": "create_order", "codigo_op": codigo_op, "message": "Order created. Now asking for parts."}
+                    msg = generate_agent_response(message, action_result)
+                    
+                    # Set active order in context to allow adding parts next
+                    response_obj = ChatResponse(response=msg, new_context={"active_order_op": codigo_op, "partial_data": {}})
+                elif any(k in message.lower() for k in ["não", "nao", "cancel"]):
+                    msg = generate_agent_response(message, {"status": "cancelled", "action": "create_order"})
+                    response_obj = ChatResponse(response=msg, new_context={})
+                else:
+                     pass
+
+            if not response_obj:
+                if not missing:
+                    action_result = {"status": "confirmation_needed", "action": "create_order", "data": data}
+                    msg = generate_agent_response(message, action_result)
+                    response_obj = ChatResponse(response=msg, new_context={"awaiting_create_confirmation": True, "partial_data": data})
+                else:
+                    if extraction.get("missing_message"):
+                        response_obj = ChatResponse(response=extraction.get("missing_message"), new_context={"partial_data": data})
+                    else:
+                        action_result = {"status": "missing_data", "missing_fields": missing, "current_data": data}
+                        msg = generate_agent_response(message, action_result)
+                        response_obj = ChatResponse(response=msg, new_context={"partial_data": data})
+
+        # --- ADD PARTS INTENT ---
+        elif extraction.get("is_add_part_intent"):
+            supabase = get_supabase()
+            parts_data = extraction.get("parts_data", [])
+            active_op = state.get("active_order_op")
+            
+            if not active_op:
+                # Try to find if user mentioned an OP in the message, otherwise fail
+                msg = generate_agent_response(message, {"status": "error", "message": "Nenhum pedido ativo para adicionar peças."})
+                response_obj = ChatResponse(response=msg)
+            elif not parts_data:
+                msg = generate_agent_response(message, {"status": "error", "message": "Não entendi quais peças adicionar."})
+                response_obj = ChatResponse(response=msg)
+            else:
+                # Fetch order details for context
+                order_res = supabase.table("ordem_pedido").select("*").eq("codigo_op", active_op).execute()
+                if order_res.data:
+                    order_info = order_res.data[0]
+                    parts_payload = []
+                    for p in parts_data:
+                        p["codigo_op"] = active_op
+                        p["status"] = "Pendente"
+                        p["nome_cliente"] = order_info["nome_cliente"]
+                        p["data_entrega"] = order_info["data_entrega"]
+                        p["pecas_produzidas"] = 0
+                        parts_payload.append(p)
+                    
+                    supabase.table("pecas").insert(parts_payload).execute()
+                    
+                    action_result = {"status": "success", "action": "add_parts", "count": len(parts_payload), "codigo_op": active_op}
+                    msg = generate_agent_response(message, action_result)
+                    # Keep active_op in context to allow adding more parts
+                    response_obj = ChatResponse(response=msg, new_context={"active_order_op": active_op})
+                else:
+                    msg = generate_agent_response(message, {"status": "error", "message": "Pedido não encontrado."})
+                    response_obj = ChatResponse(response=msg, new_context={})
+
+        # --- DEFAULT ---
+        if not response_obj:
+            msg = generate_agent_response(message, {"status": "unknown_intent", "message": "Não entendi a intenção."})
+            response_obj = ChatResponse(response=msg, new_context=state)
     if phone and redis_client:
         try:
             # 3a. Update History
