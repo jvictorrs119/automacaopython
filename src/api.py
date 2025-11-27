@@ -404,63 +404,6 @@ def chat_endpoint(req: ChatRequest):
         # --- CREATE ORDER INTENT ---
         elif extraction.get("is_order_intent"):
             supabase = get_supabase()
-            data = extraction.get("data")
-            missing = extraction.get("missing_fields", [])
-            
-            if state.get("awaiting_create_confirmation") and not missing:
-                if any(k in message.lower() for k in ["sim", "s", "yes", "confirm"]):
-                    # Create logic
-                    order_payload = {k: v for k, v in data.items() if k != "pecas"}
-                    codigo_op = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-                    order_payload["codigo_op"] = codigo_op
-                    order_payload["status"] = "Em Produção"
-                    if not order_payload.get("previsao_entrega"): order_payload["previsao_entrega"] = order_payload["data_entrega"]
-                    
-                    supabase.table("ordem_pedido").insert(order_payload).execute()
-                    
-                    created_parts_count = 0
-                    if "pecas" in data and data["pecas"]:
-                        parts_payload = []
-                        for p in data["pecas"]:
-                            p["codigo_op"] = codigo_op
-                            p["status"] = "Pendente"
-                            p["nome_cliente"] = order_payload["nome_cliente"]
-                            p["data_entrega"] = order_payload["data_entrega"]
-                            p["pecas_produzidas"] = 0
-                            parts_payload.append(p)
-                        supabase.table("pecas").insert(parts_payload).execute()
-                        created_parts_count = len(parts_payload)
-                    
-                    trigger_n8n_webhook({"event": "new_order", "codigo_op": codigo_op, "data": order_payload})
-                    
-                    action_result = {"status": "success", "action": "create_order", "codigo_op": codigo_op, "parts_count": created_parts_count}
-                    msg = generate_agent_response(message, action_result)
-                    response_obj = ChatResponse(response=msg, new_context={})
-                elif any(k in message.lower() for k in ["não", "nao", "cancel"]):
-                    msg = generate_agent_response(message, {"status": "cancelled", "action": "create_order"})
-                    response_obj = ChatResponse(response=msg, new_context={})
-                else:
-                     pass
-
-            if not response_obj:
-                if not missing:
-                    action_result = {"status": "confirmation_needed", "action": "create_order", "data": data}
-                    msg = generate_agent_response(message, action_result)
-                    response_obj = ChatResponse(response=msg, new_context={"awaiting_create_confirmation": True, "partial_data": data})
-                else:
-                    if extraction.get("missing_message"):
-                        response_obj = ChatResponse(response=extraction.get("missing_message"), new_context={"partial_data": data})
-                    else:
-                        action_result = {"status": "missing_data", "missing_fields": missing, "current_data": data}
-                        msg = generate_agent_response(message, action_result)
-                        response_obj = ChatResponse(response=msg, new_context={"partial_data": data})
-
-        # --- DEFAULT ---
-        if not response_obj:
-            msg = generate_agent_response(message, {"status": "unknown_intent", "message": "Não entendi a intenção."})
-            response_obj = ChatResponse(response=msg, new_context=state)
-
-    # 3. Save Context (History + State) to Redis if Phone Provided
     if phone and redis_client:
         try:
             # 3a. Update History

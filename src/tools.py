@@ -107,26 +107,20 @@ Analise a mensagem do usuário e o contexto atual para identificar a intenção 
 "{message}"
 
 **Regras de Prioridade (CRÍTICO):**
-1. **CONTINUIDADE DE CONVERSA:**
-   - Olhe para o **Histórico Recente**. Se a última mensagem do assistente foi uma pergunta (ex: "Qual a data?", "Qual o cliente?", "Quais peças?"), e a resposta do usuário parece ser a resposta para essa pergunta:
-     - MANTENHA a intenção anterior (se estava criando pedido, `is_order_intent` = true).
-     - EXTRAIA o dado da resposta e MESCLE com os 'Dados Atuais'.
-     - Exemplo: Contexto tem `nome_cliente`, falta `data_entrega`. Assistente perguntou "Qual a data?". Usuário respondeu "29/12/2025".
-       -> Resultado: `is_order_intent`: true, `data`: {{ "nome_cliente": "...", "data_entrega": "2025-12-29" }}
-   - Se o usuário responder apenas com um dado solto (ex: uma data, um nome, um número) e houver campos faltando nos 'Dados Atuais', assuma que é o preenchimento desse campo.
+1. **ADICIONAR PEÇAS (is_add_part_intent):**
+   - Se o contexto tiver um `active_order_op` (ou se o usuário mencionar um número de pedido existente) e o usuário listar peças (nome, quantidade), isso é `is_add_part_intent`.
+   - Exemplo: "Adicionar 10 peças X", "Peça Y: 5 unidades".
 
-2. **EXTRAÇÃO DE CLIENTE (Nova Intenção):**
+2. **CRIAR PEDIDO (is_order_intent):**
    - "crie uma op para [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
    - "pedido do [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
-   - "op da [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
+   - Se o usuário confirmar a criação de um pedido, mantenha `is_order_intent`.
 
 **Campos Obrigatórios para CRIAR PEDIDO (is_order_intent = true):**
-Para que o pedido seja considerado completo, TODOS os campos abaixo devem estar preenchidos. Se algum faltar, adicione-o à lista `missing_fields`.
+Para que o pedido seja considerado completo para CRIAÇÃO INICIAL, apenas os dados do cabeçalho são necessários:
 1. **nome_cliente**: String.
 2. **data_entrega**: Data (YYYY-MM-DD). Se não informado, pergunte. Se "hoje", use {date.today()}.
-3. **pecas**: LISTA de objetos. DEVE ter pelo menos 1 item. Cada item deve ter 'nome_peca' e 'quantidade'.
-   - Se 'pecas' for uma lista vazia ou não existir, ADICIONE "pecas" em `missing_fields`.
-   - Se o usuário listou peças, extraia-as e adicione à lista existente (se houver).
+*Nota: As peças NÃO são obrigatórias nesta etapa. Elas serão pedidas DEPOIS.*
 
 **Regras Gerais:**
 - Para 'icms', se não informado, assuma 0.
@@ -138,6 +132,7 @@ Para que o pedido seja considerado completo, TODOS os campos abaixo devem estar 
 Retorne APENAS um JSON com a seguinte estrutura:
 {{
   "is_order_intent": boolean, 
+  "is_add_part_intent": boolean,
   "is_search_intent": boolean,
   "is_delete_intent": boolean,
   "is_update_intent": boolean,
@@ -147,8 +142,9 @@ Retorne APENAS um JSON com a seguinte estrutura:
   "update_target": "string ou null",
   "update_query": "string ou null",
   "update_fields": {{ ... }},
-  "data": {{ ... objeto com todos os campos acumulados (mescle os dados novos com os do contexto) ... }},
-  "missing_fields": [ ... lista de strings com os nomes dos campos OBRIGATÓRIOS que AINDA faltam. Ex: ["pecas"] ... ],
+  "data": {{ ... objeto com todos os campos acumulados ... }},
+  "parts_data": [ ... lista de objetos {{ "nome_peca":Str, "quantidade":Int, "preco_unitario":Float }} se houver intenção de adicionar peças ... ],
+  "missing_fields": [ ... lista de strings com os nomes dos campos OBRIGATÓRIOS (apenas cliente/data) que AINDA faltam ... ],
   "missing_message": "Pergunta curta e natural pedindo os dados que faltam. Null se não faltar nada."
 }}
 """
