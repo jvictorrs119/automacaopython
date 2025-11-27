@@ -120,11 +120,13 @@ Analise a mensagem do usuário e o contexto atual para identificar a intenção 
    - "pedido do [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
    - "op da [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
 
-**Campos Obrigatórios para CRIAR PEDIDO:**
-Para considerar a intenção de criação como "completa" (sem missing_fields), os seguintes campos DEVEM estar presentes e válidos:
-1. **nome_cliente**
-2. **data_entrega** (Se não informado, pergunte. Se o usuário disser "hoje", use {date.today()})
-3. **pecas** (Deve ser uma lista com pelo menos 1 item. Cada item deve ter 'nome_peca' e 'quantidade')
+**Campos Obrigatórios para CRIAR PEDIDO (is_order_intent = true):**
+Para que o pedido seja considerado completo, TODOS os campos abaixo devem estar preenchidos. Se algum faltar, adicione-o à lista `missing_fields`.
+1. **nome_cliente**: String.
+2. **data_entrega**: Data (YYYY-MM-DD). Se não informado, pergunte. Se "hoje", use {date.today()}.
+3. **pecas**: LISTA de objetos. DEVE ter pelo menos 1 item. Cada item deve ter 'nome_peca' e 'quantidade'.
+   - Se 'pecas' for uma lista vazia ou não existir, ADICIONE "pecas" em `missing_fields`.
+   - Se o usuário listou peças, extraia-as e adicione à lista existente (se houver).
 
 **Regras Gerais:**
 - Para 'icms', se não informado, assuma 0.
@@ -146,7 +148,7 @@ Retorne APENAS um JSON com a seguinte estrutura:
   "update_query": "string ou null",
   "update_fields": {{ ... }},
   "data": {{ ... objeto com todos os campos acumulados (mescle os dados novos com os do contexto) ... }},
-  "missing_fields": [ ... lista de strings com os nomes dos campos OBRIGATÓRIOS que AINDA faltam ... ],
+  "missing_fields": [ ... lista de strings com os nomes dos campos OBRIGATÓRIOS que AINDA faltam. Ex: ["pecas"] ... ],
   "missing_message": "Pergunta curta e natural pedindo os dados que faltam. Null se não faltar nada."
 }}
 """
