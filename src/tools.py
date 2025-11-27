@@ -107,11 +107,16 @@ Analise a mensagem do usuário e o contexto atual para identificar a intenção 
 "{message}"
 
 **Regras de Prioridade (CRÍTICO):**
-1. **ADICIONAR PEÇAS (is_add_part_intent):**
+1. **CONTINUIDADE DE CONVERSA (Confirmations/Follow-ups):**
+   - Se o usuário disser apenas "sim", "ok", "confirmo", "não", "cancelar":
+     - Verifique o **Histórico Recente**. Se a última ação do assistente foi pedir confirmação para CRIAR PEDIDO, defina `is_order_intent` = true.
+     - Se foi pedir confirmação para DELETAR, defina `is_delete_intent` = true.
+
+2. **ADICIONAR PEÇAS (is_add_part_intent):**
    - Se o contexto tiver um `active_order_op` (ou se o usuário mencionar um número de pedido existente) e o usuário listar peças (nome, quantidade), isso é `is_add_part_intent`.
    - Exemplo: "Adicionar 10 peças X", "Peça Y: 5 unidades".
 
-2. **CRIAR PEDIDO (is_order_intent):**
+3. **CRIAR PEDIDO (is_order_intent):**
    - "crie uma op para [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
    - "pedido do [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
    - Se o usuário confirmar a criação de um pedido, mantenha `is_order_intent`.

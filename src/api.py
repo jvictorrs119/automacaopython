@@ -514,3 +514,25 @@ def chat_endpoint(req: ChatRequest):
             print(f"Failed to save context to Redis: {e}")
             
     return response_obj
+
+@app.get("/context/{phone_number}")
+def get_context(phone_number: str):
+    """
+    Debug endpoint to view the current context (history and state) for a user.
+    """
+    redis_client = get_redis_client()
+    if not redis_client:
+        raise HTTPException(status_code=500, detail="Redis unavailable")
+        
+    try:
+        history = redis_client.lrange(f"chat:{phone_number}:history", 0, -1)
+        state_json = redis_client.get(f"chat:{phone_number}:state")
+        state = json.loads(state_json) if state_json else {}
+        
+        return {
+            "phone_number": phone_number,
+            "history": history,
+            "state": state
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
