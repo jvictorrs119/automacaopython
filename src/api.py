@@ -19,8 +19,11 @@ from src.tools import (
     extract_parts_from_message,
     extract_text_from_pdf,
     extract_data_with_ai,
+    extract_data_with_ai,
     generate_agent_response
 )
+from src.redis_client import get_redis_client
+import json
 
 app = FastAPI(title="Production Monitoring API")
 
@@ -291,41 +294,42 @@ def delete_part(part_id: str):
 def chat_endpoint(req: ChatRequest):
     """
     Intelligent endpoint that processes user messages.
-    If 'phone_number' is provided, it automatically manages context in the DB.
+    If 'phone_number' is provided, it automatically manages context in Redis.
     """
-    supabase = get_supabase()
+    redis_client = get_redis_client()
     message = req.message
     phone = req.phone_number
     
-    # 1. Load Context and History
-    # We want to store: { "history": [...], "state": {...} }
-    saved_context = {}
-    if phone:
+    # 1. Load Context and History from Redis
+    history = []
+    state = {}
+    
+    if phone and redis_client:
         try:
-            res = supabase.table("chat_sessions").select("context").eq("phone_number", phone).execute()
-            if res.data:
-                saved_context = res.data[0]["context"] or {}
-        except:
-            pass 
+            # Load history (List of strings)
+            # lrange 0 -1 gets all elements
+            history = redis_client.lrange(f"chat:{phone}:history", 0, -1)
+            
+            # Load state (JSON string)
+            state_json = redis_client.get(f"chat:{phone}:state")
+            if state_json:
+                state = json.loads(state_json)
+        except Exception as e:
+            print(f"Failed to load context from Redis: {e}")
 
-    # Parse history and state from saved_context
-    # Handle backward compatibility where context was just the state
-    if "history" in saved_context and isinstance(saved_context["history"], list):
-        history = saved_context["history"]
-        state = saved_context.get("state", {})
-    else:
-        # Assume it was the old format (just state)
-        history = []
-        state = saved_context
-
-    # Append current user message
-    history.append({"role": "user", "content": message})
-    # Keep only last 10 messages (user + assistant)
-    history = history[-10:]
-
+    # Append current user message to history for the tool (and storage)
+    user_msg_str = f"USER: {message}"
+    
+    # We add it to the local history list for the tool to see context
+    # Note: The tool prompt separates history and current message, but we'll follow the flow.
+    # Actually, let's keep the history passed to the tool as the *previous* history + current?
+    # The original code appended it.
+    history.append(user_msg_str)
+    
     # 2. Analyze Message
     current_data = state.get("partial_data")
-    # Use the loaded history for extraction
+    
+    # Extract data using the history (which now contains strings)
     extraction = extract_data_from_message(message, current_data, history)
     
     response_obj = None
@@ -333,15 +337,13 @@ def chat_endpoint(req: ChatRequest):
     if not extraction:
         response_obj = ChatResponse(response="Desculpe, tive um erro interno.")
     else:
-        # ... (Logic for intents - simplified for brevity, we keep the existing logic structure but wrap the return)
-        # We need to capture the result to save context before returning
-        
         # --- SEARCH INTENT ---
         if extraction.get("is_search_intent"):
             query = extraction.get("search_query")
             if not query:
                 response_obj = ChatResponse(response="O que você deseja buscar?")
             else:
+                supabase = get_supabase()
                 orders_res = supabase.table("ordem_pedido").select("*").or_(f"nome_cliente.ilike.%{query}%,codigo_op.ilike.%{query}%,status.ilike.%{query}%").execute()
                 parts_res = supabase.table("pecas").select("*").or_(f"nome_peca.ilike.%{query}%,nome_cliente.ilike.%{query}%,codigo_op.ilike.%{query}%,status.ilike.%{query}%").execute()
                 
@@ -358,6 +360,7 @@ def chat_endpoint(req: ChatRequest):
 
         # --- DELETE INTENT ---
         elif extraction.get("is_delete_intent"):
+            supabase = get_supabase()
             target = extraction.get("delete_target")
             query = extraction.get("delete_query")
             
@@ -400,6 +403,7 @@ def chat_endpoint(req: ChatRequest):
 
         # --- CREATE ORDER INTENT ---
         elif extraction.get("is_order_intent"):
+            supabase = get_supabase()
             data = extraction.get("data")
             missing = extraction.get("missing_fields", [])
             
@@ -436,8 +440,6 @@ def chat_endpoint(req: ChatRequest):
                     msg = generate_agent_response(message, {"status": "cancelled", "action": "create_order"})
                     response_obj = ChatResponse(response=msg, new_context={})
                 else:
-                     # Re-ask confirmation if ambiguous? Or treat as no? Let's assume re-ask or default fallback.
-                     # For now, let's just fall through to default.
                      pass
 
             if not response_obj:
@@ -458,27 +460,32 @@ def chat_endpoint(req: ChatRequest):
             msg = generate_agent_response(message, {"status": "unknown_intent", "message": "Não entendi a intenção."})
             response_obj = ChatResponse(response=msg, new_context=state)
 
-    # 3. Save Context (History + State) if Phone Provided
-    if phone:
-        # Append assistant response to history
-        history.append({"role": "assistant", "content": response_obj.response})
-        history = history[-10:] # Keep last 10
-        
-        # Determine new state
-        new_state = response_obj.new_context if response_obj.new_context is not None else state
-        
-        final_context = {
-            "history": history,
-            "state": new_state
-        }
-
+    # 3. Save Context (History + State) to Redis if Phone Provided
+    if phone and redis_client:
         try:
-            supabase.table("chat_sessions").upsert({
-                "phone_number": phone,
-                "context": final_context,
-                "updated_at": datetime.now().isoformat()
-            }).execute()
+            # 3a. Update History
+            # We need to push the user message and the assistant response
+            # Since we already appended user_msg_str to the local 'history' variable, we need to be careful not to duplicate if we were using it for something else, 
+            # but for Redis we just push.
+            
+            # Push User Message
+            redis_client.rpush(f"chat:{phone}:history", user_msg_str)
+            
+            # Push Assistant Response
+            assistant_msg_str = f"ASSISTANT: {response_obj.response}"
+            redis_client.rpush(f"chat:{phone}:history", assistant_msg_str)
+            
+            # Trim to last 10 messages
+            # LTRIM key start stop. We want last 10.
+            # If list has 12 items, indices are 0..11. We want 2..11.
+            # -10 is the 10th from the end. -1 is the last.
+            redis_client.ltrim(f"chat:{phone}:history", -10, -1)
+            
+            # 3b. Update State
+            new_state = response_obj.new_context if response_obj.new_context is not None else state
+            redis_client.set(f"chat:{phone}:state", json.dumps(new_state))
+            
         except Exception as e:
-            print(f"Failed to save context: {e}")
+            print(f"Failed to save context to Redis: {e}")
             
     return response_obj

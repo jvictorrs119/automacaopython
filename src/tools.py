@@ -88,9 +88,10 @@ def extract_data_from_message(message, current_data, history=[]):
     # Format history for the prompt
     history_str = ""
     if history:
-        history_str = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in history])
-    else:
-        history_str = "Nenhum histórico recente."
+        if isinstance(history[0], dict):
+            history_str = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in history])
+        else:
+            history_str = "\n".join(history)
 
     prompt = f"""
 Você é um assistente especializado em extrair dados de pedidos de produção.
