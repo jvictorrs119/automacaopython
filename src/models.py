@@ -41,7 +41,7 @@ class AlertaAtraso(BaseModel):
 class OrderCreate(BaseModel):
     nome_cliente: str
     numero_pedido: int
-    data_pedido: date
+    data_pedido: Optional[date] = None
     preco_total: float
     data_entrega: date
     icms: float = 0.0

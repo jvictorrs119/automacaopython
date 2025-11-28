@@ -2,7 +2,6 @@ import os
 import requests
 import json
 from datetime import date
-from pypdf import PdfReader
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -18,12 +17,8 @@ def get_openai_client():
     return OpenAI(api_key=OPENAI_API_KEY)
 
 def extract_text_from_pdf(uploaded_file):
-    """Extract text from PDF file"""
-    reader = PdfReader(uploaded_file)
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text()
-    return text
+    """Function disabled."""
+    return ""
 
 def extract_data_with_ai(pdf_text):
     """Use GPT-4.1-mini to extract structured data from PDF text"""
@@ -56,7 +51,7 @@ Se alguma informação não estiver disponível, use valores padrão razoáveis 
         if not client: return None
         
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini-2025-04-14",
             messages=[
                 {"role": "system", "content": "Você é um assistente que extrai dados estruturados de documentos e retorna apenas JSON válido."},
                 {"role": "user", "content": prompt}
@@ -130,8 +125,16 @@ Para que o pedido seja considerado completo para CRIAÇÃO INICIAL, apenas os da
 **Regras Gerais:**
 - Para 'icms', se não informado, assuma 0.
 - Para 'previsao_entrega', se não informado, assuma igual à 'data_entrega'.
+- Para 'preco_total': Extraia apenas o número. Ex: "1500 reais" -> 1500.00.
+- Para 'data_pedido': Se não mencionado, use null (o sistema preencherá).
 - **Para DELETAR:** 'delete_target' ("order"/"part"), 'delete_query'.
 - **Para EDITAR:** 'update_target', 'update_query', 'update_fields'.
+- **Para BUSCAR (is_search_intent):**
+  - O 'search_query' deve conter APENAS o termo essencial de busca.
+  - Remova palavras como "cliente", "pedido", "op", "procure", "busque", "pesquise".
+  - Exemplo: "procure cliente Yuri" -> search_query="Yuri"
+  - Exemplo: "busque pedido 123" -> search_query="123"
+  - Exemplo: "peça parafuso" -> search_query="parafuso"
 
 **Saída JSON:**
 Retorne APENAS um JSON com a seguinte estrutura:
@@ -159,7 +162,7 @@ Retorne APENAS um JSON com a seguinte estrutura:
         if not client: return None
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini-2025-04-14",
             messages=[
                 {"role": "system", "content": "Você é um assistente de API que retorna apenas JSON estrito."},
                 {"role": "user", "content": prompt}
@@ -198,7 +201,7 @@ Se não encontrar peças, retorne lista vazia.
         if not client: return []
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini-2025-04-14",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1
         )
@@ -243,7 +246,7 @@ def generate_agent_response(user_message, action_result, context_data=None):
         if not client: return "Desculpe, serviço de IA indisponível."
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini-2025-04-14",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7
         )
@@ -367,3 +370,34 @@ def delete_part(part_id):
         print(f"Erro de conexão: {e}")
         return None
 
+
+def get_chat_response(message, history=[]):
+    """Generate a natural conversational response"""
+    try:
+        client = get_openai_client()
+        if not client: return "Desculpe, serviço indisponível."
+
+        # Format history
+        history_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history[-5:]])
+
+        prompt = f"""
+        Você é um assistente de produção industrial útil e amigável.
+        O usuário enviou uma mensagem que NÃO é um comando específico de sistema (não é criar pedido, buscar, deletar, etc).
+        
+        Histórico:
+        {history_str}
+        
+        Usuário: {message}
+        
+        Responda de forma prestativa, tirando dúvidas ou explicando o que você pode fazer (criar pedidos, buscar peças, verificar alertas).
+        Seja breve.
+        """
+
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini-2025-04-14",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return "Desculpe, não consegui processar sua mensagem."

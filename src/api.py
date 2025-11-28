@@ -65,6 +65,8 @@ def create_order(order: OrderCreate):
     order_data["status"] = "Em Produção"
     if not order_data.get("previsao_entrega"):
         order_data["previsao_entrega"] = order_data["data_entrega"]
+    if not order_data.get("data_pedido"):
+        order_data["data_pedido"] = date.today().isoformat()
     
     # Insert into Supabase
     try:
@@ -500,11 +502,10 @@ def chat_endpoint(req: ChatRequest):
             assistant_msg_str = f"ASSISTANT: {response_obj.response}"
             redis_client.rpush(f"chat:{phone}:history", assistant_msg_str)
             
-            # Trim to last 10 messages
-            # LTRIM key start stop. We want last 10.
-            # If list has 12 items, indices are 0..11. We want 2..11.
-            # -10 is the 10th from the end. -1 is the last.
-            redis_client.ltrim(f"chat:{phone}:history", -10, -1)
+            # Trim to last 5 messages
+            # LTRIM key start stop. We want last 5.
+            # -5 is the 5th from the end. -1 is the last.
+            redis_client.ltrim(f"chat:{phone}:history", -5, -1)
             
             # 3b. Update State
             new_state = response_obj.new_context if response_obj.new_context is not None else state
@@ -536,3 +537,11 @@ def get_context(phone_number: str):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/webhook/n8n", response_model=ChatResponse)
+def n8n_webhook(req: ChatRequest):
+    """
+    Webhook for n8n to send messages.
+    Reuses the chat logic.
+    """
+    return chat_endpoint(req)
