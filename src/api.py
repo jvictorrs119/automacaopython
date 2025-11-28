@@ -19,9 +19,26 @@ from src.tools import (
     extract_parts_from_message,
     extract_text_from_pdf,
     extract_data_with_ai,
-    extract_data_with_ai,
-    generate_agent_response
+    generate_agent_response,
+    get_chat_response
 )
+
+# ... (rest of imports)
+
+# ... (inside chat_endpoint)
+
+            # --- DEFAULT ---
+            if not response_obj:
+                # Fallback to conversational agent with history
+                # We exclude the last item from history_str_list because it is the current message, 
+                # and get_chat_response takes the current message separately.
+                history_context = history_str_list[:-1] if history_str_list else []
+                
+                ai_response = get_chat_response(message, history_context)
+                response_obj = ChatResponse(response=ai_response, new_context=state)
+            
+        if phone:
+# ...
 
 import json
 
@@ -489,8 +506,10 @@ def chat_endpoint(req: ChatRequest):
 
             # --- DEFAULT ---
             if not response_obj:
-                msg = generate_agent_response(message, {"status": "unknown_intent", "message": "Não entendi a intenção."})
-                response_obj = ChatResponse(response=msg, new_context=state)
+                # Fallback to conversational agent with history
+                history_context = history_str_list[:-1] if history_str_list else []
+                ai_response = get_chat_response(message, history_context)
+                response_obj = ChatResponse(response=ai_response, new_context=state)
                 
         if phone:
             try:
@@ -498,7 +517,8 @@ def chat_endpoint(req: ChatRequest):
                 
                 # Append new messages to history object
                 history_objs.append({"role": "user", "content": message})
-                history_objs.append({"role": "assistant", "content": response_obj.response})
+                if response_obj and response_obj.response:
+                    history_objs.append({"role": "assistant", "content": response_obj.response})
                 
                 # Keep only last 20 messages to avoid huge JSONs
                 if len(history_objs) > 20:
