@@ -350,8 +350,9 @@ def chat_endpoint(req: ChatRequest):
                 if not query:
                     response_obj = ChatResponse(response="O que você deseja buscar?")
                 else:
-                    orders_res = supabase.table("ordem_pedido").select("*").or_(f"nome_cliente.ilike.%{query}%,codigo_op.ilike.%{query}%,status.ilike.%{query}%").execute()
-                    parts_res = supabase.table("pecas").select("*").or_(f"nome_peca.ilike.%{query}%,nome_cliente.ilike.%{query}%,codigo_op.ilike.%{query}%,status.ilike.%{query}%").execute()
+                    safe_query = query.strip()
+                    orders_res = supabase.table("ordem_pedido").select("*").or_(f"nome_cliente.ilike.%{safe_query}%,codigo_op.ilike.%{safe_query}%,status.ilike.%{safe_query}%").execute()
+                    parts_res = supabase.table("pecas").select("*").or_(f"nome_peca.ilike.%{safe_query}%,nome_cliente.ilike.%{safe_query}%,codigo_op.ilike.%{safe_query}%,status.ilike.%{safe_query}%").execute()
                     
                     orders = orders_res.data
                     parts = parts_res.data
