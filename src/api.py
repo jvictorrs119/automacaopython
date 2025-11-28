@@ -22,7 +22,7 @@ from src.tools import (
     extract_data_with_ai,
     generate_agent_response
 )
-from src.redis_client import get_redis_client
+
 import json
 
 app = FastAPI(title="Production Monitoring API")
@@ -296,44 +296,44 @@ def delete_part(part_id: str):
 def chat_endpoint(req: ChatRequest):
     """
     Intelligent endpoint that processes user messages.
-    If 'phone_number' is provided, it automatically manages context in Redis.
+    Manages context in a single Supabase table 'chat_sessions'.
     """
-    redis_client = get_redis_client()
+    supabase = get_supabase()
     message = req.message
     phone = req.phone_number
     
-    # 1. Load Context and History from Redis
-    history = []
+    # 1. Load Context and History from Supabase
+    history_objs = [] # List of dicts: [{"role": "...", "content": "..."}]
+    history_str_list = [] # List of strings for the agent tool: ["ROLE: Content"]
     state = {}
     
-    if phone and redis_client:
+    if phone:
         try:
-            # Load history (List of strings)
-            # lrange 0 -1 gets all elements
-            raw_history = redis_client.lrange(f"chat:{phone}:history", 0, -1)
-            history = [h.decode("utf-8") if isinstance(h, bytes) else h for h in raw_history]
-            
-            # Load state (JSON string)
-            state_json = redis_client.get(f"chat:{phone}:state")
-            if state_json:
-                state = json.loads(state_json)
+            # Fetch session
+            res = supabase.table("chat_sessions").select("*").eq("phone_number", phone).execute()
+            if res.data:
+                session = res.data[0]
+                history_objs = session.get("history", [])
+                state = session.get("state", {})
+                
+                # Prepare history for the tool (Last 5 messages)
+                # history_objs is stored chronologically (oldest first)
+                # We take the last 5
+                recent_history = history_objs[-5:]
+                history_str_list = [f"{h['role'].upper()}: {h['content']}" for h in recent_history]
+                
         except Exception as e:
-            print(f"Failed to load context from Redis: {e}")
+            print(f"Failed to load session from Supabase: {e}")
 
-    # Append current user message to history for the tool (and storage)
+    # Append current user message for the tool logic
     user_msg_str = f"USER: {message}"
-    
-    # We add it to the local history list for the tool to see context
-    # Note: The tool prompt separates history and current message, but we'll follow the flow.
-    # Actually, let's keep the history passed to the tool as the *previous* history + current?
-    # The original code appended it.
-    history.append(user_msg_str)
+    history_str_list.append(user_msg_str)
     
     # 2. Analyze Message
     current_data = state.get("partial_data")
     
-    # Extract data using the history (which now contains strings)
-    extraction = extract_data_from_message(message, current_data, history)
+    # Extract data using the history
+    extraction = extract_data_from_message(message, current_data, history_str_list)
     
     response_obj = None
     
@@ -346,7 +346,6 @@ def chat_endpoint(req: ChatRequest):
             if not query:
                 response_obj = ChatResponse(response="O que você deseja buscar?")
             else:
-                supabase = get_supabase()
                 orders_res = supabase.table("ordem_pedido").select("*").or_(f"nome_cliente.ilike.%{query}%,codigo_op.ilike.%{query}%,status.ilike.%{query}%").execute()
                 parts_res = supabase.table("pecas").select("*").or_(f"nome_peca.ilike.%{query}%,nome_cliente.ilike.%{query}%,codigo_op.ilike.%{query}%,status.ilike.%{query}%").execute()
                 
@@ -363,7 +362,6 @@ def chat_endpoint(req: ChatRequest):
 
         # --- DELETE INTENT ---
         elif extraction.get("is_delete_intent"):
-            supabase = get_supabase()
             target = extraction.get("delete_target")
             query = extraction.get("delete_query")
             
@@ -406,7 +404,6 @@ def chat_endpoint(req: ChatRequest):
 
         # --- CREATE ORDER INTENT ---
         elif extraction.get("is_order_intent"):
-            supabase = get_supabase()
             data = extraction.get("data")
             missing = extraction.get("missing_fields", [])
             
@@ -418,6 +415,7 @@ def chat_endpoint(req: ChatRequest):
                     order_payload["codigo_op"] = codigo_op
                     order_payload["status"] = "Em Produção"
                     if not order_payload.get("previsao_entrega"): order_payload["previsao_entrega"] = order_payload["data_entrega"]
+                    if not order_payload.get("data_pedido"): order_payload["data_pedido"] = date.today().isoformat()
                     
                     supabase.table("ordem_pedido").insert(order_payload).execute()
                     
@@ -450,7 +448,6 @@ def chat_endpoint(req: ChatRequest):
 
         # --- ADD PARTS INTENT ---
         elif extraction.get("is_add_part_intent"):
-            supabase = get_supabase()
             parts_data = extraction.get("parts_data", [])
             active_op = state.get("active_order_op")
             
@@ -489,53 +486,46 @@ def chat_endpoint(req: ChatRequest):
         if not response_obj:
             msg = generate_agent_response(message, {"status": "unknown_intent", "message": "Não entendi a intenção."})
             response_obj = ChatResponse(response=msg, new_context=state)
-    if phone and redis_client:
+            
+    if phone:
         try:
-            # 3a. Update History
-            # We need to push the user message and the assistant response
-            # Since we already appended user_msg_str to the local 'history' variable, we need to be careful not to duplicate if we were using it for something else, 
-            # but for Redis we just push.
+            # 3. Update Session in Supabase
             
-            # Push User Message
-            redis_client.rpush(f"chat:{phone}:history", user_msg_str)
+            # Append new messages to history object
+            history_objs.append({"role": "user", "content": message})
+            history_objs.append({"role": "assistant", "content": response_obj.response})
             
-            # Push Assistant Response
-            assistant_msg_str = f"ASSISTANT: {response_obj.response}"
-            redis_client.rpush(f"chat:{phone}:history", assistant_msg_str)
+            # Keep only last 20 messages to avoid huge JSONs
+            if len(history_objs) > 20:
+                history_objs = history_objs[-20:]
             
-            # Trim to last 5 messages
-            # LTRIM key start stop. We want last 5.
-            # -5 is the 5th from the end. -1 is the last.
-            redis_client.ltrim(f"chat:{phone}:history", -5, -1)
-            
-            # 3b. Update State
+            # Update State
             new_state = response_obj.new_context if response_obj.new_context is not None else state
-            redis_client.set(f"chat:{phone}:state", json.dumps(new_state))
+            
+            # Upsert session
+            supabase.table("chat_sessions").upsert({
+                "phone_number": phone,
+                "history": history_objs,
+                "state": new_state,
+                "updated_at": datetime.now().isoformat()
+            }).execute()
             
         except Exception as e:
-            print(f"Failed to save context to Redis: {e}")
+            print(f"Failed to save session to Supabase: {e}")
             
     return response_obj
 
 @app.get("/context/{phone_number}")
 def get_context(phone_number: str):
     """
-    Debug endpoint to view the current context (history and state) for a user.
+    Debug endpoint to view the current context (history and state) for a user from Supabase.
     """
-    redis_client = get_redis_client()
-    if not redis_client:
-        raise HTTPException(status_code=500, detail="Redis unavailable")
-        
+    supabase = get_supabase()
     try:
-        history = redis_client.lrange(f"chat:{phone_number}:history", 0, -1)
-        state_json = redis_client.get(f"chat:{phone_number}:state")
-        state = json.loads(state_json) if state_json else {}
-        
-        return {
-            "phone_number": phone_number,
-            "history": history,
-            "state": state
-        }
+        res = supabase.table("chat_sessions").select("*").eq("phone_number", phone_number).execute()
+        if res.data:
+            return res.data[0]
+        return {"message": "No session found"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -86,6 +86,7 @@ def extract_data_from_message(message, current_data, history=[]):
         if isinstance(history[0], dict):
             history_str = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in history])
         else:
+            # History from Redis is a list of strings "ROLE: Message"
             history_str = "\n".join(history)
 
     prompt = f"""
