@@ -137,6 +137,13 @@ Para que o pedido seja considerado completo para CRIAÇÃO INICIAL, apenas os da
   - Exemplo: "busque pedido 123" -> search_query="123"
   - Exemplo: "peça parafuso" -> search_query="parafuso"
 
+**RESOLUÇÃO DE CONTEXTO (CRÍTICO):**
+- Se o usuário disser "mude o valor", "qual o nome do cliente", "delete isso", ou qualquer referência a algo mencionado anteriormente:
+  - OLHE O **Histórico Recente**.
+  - Identifique sobre qual pedido ou peça o ASSISTENTE falou por último.
+  - Extraia o ID, Código OP ou Nome desse item do histórico e use como 'update_target'/'update_query' ou 'search_query'.
+  - Exemplo: Histórico tem "Pedido 123 do João". Usuário diz "mude o valor para 500". -> is_update_intent=true, update_query="123", update_fields={"preco_total": 500}.
+
 **Saída JSON:**
 Retorne APENAS um JSON com a seguinte estrutura:
 {{
