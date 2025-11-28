@@ -23,22 +23,6 @@ from src.tools import (
     get_chat_response
 )
 
-# ... (rest of imports)
-
-# ... (inside chat_endpoint)
-
-            # --- DEFAULT ---
-            if not response_obj:
-                # Fallback to conversational agent with history
-                # We exclude the last item from history_str_list because it is the current message, 
-                # and get_chat_response takes the current message separately.
-                history_context = history_str_list[:-1] if history_str_list else []
-                
-                ai_response = get_chat_response(message, history_context)
-                response_obj = ChatResponse(response=ai_response, new_context=state)
-            
-        if phone:
-# ...
 
 import json
 
