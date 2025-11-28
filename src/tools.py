@@ -378,7 +378,12 @@ def get_chat_response(message, history=[]):
         if not client: return "Desculpe, serviço indisponível."
 
         # Format history
-        history_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history[-5:]])
+        history_str = ""
+        if history:
+            if isinstance(history[0], dict):
+                history_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history[-5:]])
+            else:
+                history_str = "\n".join(history[-5:])
 
         prompt = f"""
         Você é um assistente de produção industrial útil e amigável.
