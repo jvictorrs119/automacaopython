@@ -520,7 +520,8 @@ def chat_endpoint(req: ChatRequest):
         return response_obj
     except Exception as e:
         print(f"CRITICAL ERROR in chat_endpoint: {e}")
-        return ChatResponse(response="Desculpe, ocorreu um erro interno no servidor. Tente novamente mais tarde.")
+        # DEBUG: Returning error details to user to identify the issue
+        return ChatResponse(response=f"Desculpe, erro interno: {str(e)}")
 
 @app.get("/context/{phone_number}")
 def get_context(phone_number: str):
