@@ -310,7 +310,8 @@ def chat_endpoint(req: ChatRequest):
         try:
             # Load history (List of strings)
             # lrange 0 -1 gets all elements
-            history = redis_client.lrange(f"chat:{phone}:history", 0, -1)
+            raw_history = redis_client.lrange(f"chat:{phone}:history", 0, -1)
+            history = [h.decode("utf-8") if isinstance(h, bytes) else h for h in raw_history]
             
             # Load state (JSON string)
             state_json = redis_client.get(f"chat:{phone}:state")
