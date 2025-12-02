@@ -1,55 +1,53 @@
 import streamlit as st
 import os
+import requests
+import uuid
 from dotenv import load_dotenv
-from agent import ProductionAgent
-from tools import fetch_alerts
 
 load_dotenv()
+
+API_URL = os.environ.get("API_URL", "http://localhost:8000")
 
 st.set_page_config(page_title="Monitoramento de Produção", page_icon="🏭")
 
 st.title("🏭 Assistente de Produção")
 
 # Initialize Session State
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
     st.session_state.messages.append({
         "role": "assistant", 
-        "content": "Olá! Sou seu assistente de produção. 📎 Anexe um PDF de pedido e me envie uma mensagem para processá-lo, ou use os botões na barra lateral."
+        "content": "Olá! Sou seu assistente de produção. Posso ajudar a criar pedidos, cadastrar peças e verificar alertas."
     })
-
-if "agent" not in st.session_state:
-    st.session_state.agent = ProductionAgent()
-
-if "chat_context" not in st.session_state:
-    st.session_state.chat_context = []
-
-def update_chat_context(role, content):
-    """Update chat history keeping only last 10 messages"""
-    st.session_state.chat_context.append({"role": role, "content": content})
-    if len(st.session_state.chat_context) > 10:
-        st.session_state.chat_context.pop(0)
 
 # Sidebar for actions
 with st.sidebar:
     st.header("Ações")
+    st.caption(f"Sessão: {st.session_state.session_id}")
     
     if st.button("Verificar Alertas 🚨"):
-        data = fetch_alerts()
-        if data:
-            alerts = data.get("alerts", [])
-            st.session_state.messages.append({"role": "user", "content": "Verificar alertas de produção."})
-            
-            if alerts:
-                msg = f"⚠️ **Encontrei {len(alerts)} alertas de atraso/risco:**\n\n"
-                for a in alerts:
-                    msg += f"- **OP:** {a['codigo_op']} | **Peça:** {a['peca']} | **Motivo:** {a['motivo']}\n"
-                st.session_state.messages.append({"role": "assistant", "content": msg})
+        try:
+            res = requests.post(f"{API_URL}/analyze")
+            if res.status_code == 200:
+                data = res.json()
+                alerts = data.get("alerts", [])
+                st.session_state.messages.append({"role": "user", "content": "Verificar alertas de produção."})
+                
+                if alerts:
+                    msg = f"⚠️ **Encontrei {len(alerts)} alertas de atraso/risco:**\n\n"
+                    for a in alerts:
+                        msg += f"- **OP:** {a['codigo_op']} | **Peça:** {a['peca']} | **Motivo:** {a['motivo']}\n"
+                    st.session_state.messages.append({"role": "assistant", "content": msg})
+                else:
+                    st.session_state.messages.append({"role": "assistant", "content": "✅ Nenhum alerta encontrado. Produção dentro do prazo!"})
+                st.rerun()
             else:
-                st.session_state.messages.append({"role": "assistant", "content": "✅ Nenhum alerta encontrado. Produção dentro do prazo!"})
-            st.rerun()
-        else:
-            st.error("Erro ao verificar alertas.")
+                st.error("Erro ao verificar alertas na API.")
+        except Exception as e:
+            st.error(f"Erro de conexão: {e}")
 
 # Chat Interface
 for message in st.session_state.messages:
@@ -68,29 +66,35 @@ if submit_clicked:
     if not user_input:
         st.warning("⚠️ Digite uma mensagem.")
     else:
-        # Prepare input
-        prompt = user_input
-        
         # Display user message
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        update_chat_context("user", prompt)
+        st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
-            st.markdown(prompt)
+            st.markdown(user_input)
 
-        # Process with Agent
+        # Process with API
         with st.chat_message("assistant"):
             with st.spinner("🤖 Processando..."):
-                # Pass chat context to agent so it knows history
-                response_obj = st.session_state.agent.process_input(
-                    user_message=user_input, # Pass raw text input
-                    attached_file=None,
-                    chat_history=st.session_state.chat_context
-                )
-                
-                response_text = response_obj.get("response", "Sem resposta.")
-                
-                st.markdown(response_text)
-                st.session_state.messages.append({"role": "assistant", "content": response_text})
-                update_chat_context("assistant", response_text)
+                try:
+                    payload = {
+                        "message": user_input,
+                        "phone_number": st.session_state.session_id, # Use session ID as identifier
+                        "history": [] # API manages history now via Supabase
+                    }
+                    
+                    response = requests.post(f"{API_URL}/chat", json=payload)
+                    
+                    if response.status_code == 200:
+                        resp_data = response.json()
+                        response_text = resp_data.get("response", "Sem resposta da API.")
+                    else:
+                        response_text = f"Erro na API: {response.status_code} - {response.text}"
+                    
+                    st.markdown(response_text)
+                    st.session_state.messages.append({"role": "assistant", "content": response_text})
+                    
+                except Exception as e:
+                    err_msg = f"Erro de conexão com a API: {str(e)}"
+                    st.error(err_msg)
+                    st.session_state.messages.append({"role": "assistant", "content": err_msg})
         
         st.rerun()

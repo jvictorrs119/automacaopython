@@ -16,63 +16,6 @@ def get_openai_client():
         return None
     return OpenAI(api_key=OPENAI_API_KEY)
 
-def extract_text_from_pdf(uploaded_file):
-    """Function disabled."""
-    return ""
-
-def extract_data_with_ai(pdf_text):
-    """Use GPT-4.1-mini to extract structured data from PDF text"""
-    
-    prompt = f"""Você é um assistente especializado em extrair informações de pedidos de produção.
-
-Analise o texto do PDF abaixo e extraia as seguintes informações em formato JSON:
-
-- nome_cliente: Nome do cliente
-- numero_pedido: Número do pedido (inteiro)
-- data_pedido: Data do pedido (formato YYYY-MM-DD)
-- preco_total: Preço total (número decimal)
-- data_entrega: Data de entrega (formato YYYY-MM-DD)
-- icms: Valor do ICMS em porcentagem (número decimal)
-- previsao_entrega: Previsão de entrega (formato YYYY-MM-DD, geralmente igual à data_entrega)
-- pecas: Lista de objetos, cada um contendo:
-  - nome_peca: Nome da peça
-  - quantidade: Quantidade (inteiro)
-  - preco_unitario: Preço unitário (número decimal)
-
-Se alguma informação não estiver disponível, use valores padrão razoáveis baseados no contexto.
-
-**Texto do PDF:**
-{pdf_text}
-
-**IMPORTANTE:** Retorne APENAS o JSON válido, sem markdown, sem explicações, apenas o objeto JSON puro."""
-
-    try:
-        client = get_openai_client()
-        if not client: return None
-        
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini-2025-04-14",
-            messages=[
-                {"role": "system", "content": "Você é um assistente que extrai dados estruturados de documentos e retorna apenas JSON válido."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1
-        )
-        
-        result = response.choices[0].message.content.strip()
-        
-        # Remove markdown code blocks if present
-        if result.startswith("```"):
-            result = result.split("```")[1]
-            if result.startswith("json"):
-                result = result[4:]
-        
-        data = json.loads(result)
-        return data
-        
-    except Exception as e:
-        print(f"Erro ao processar com IA: {e}")
-        return None
 
 def extract_data_from_message(message, current_data, history=[]):
     """
@@ -86,7 +29,7 @@ def extract_data_from_message(message, current_data, history=[]):
         if isinstance(history[0], dict):
             history_str = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in history])
         else:
-            # History from Redis is a list of strings "ROLE: Message"
+            # History is a list of strings "ROLE: Message"
             history_str = "\n".join(history)
 
     prompt = f"""
@@ -118,16 +61,28 @@ Analise a mensagem do usuário e o contexto atual para identificar a intenção 
    - Se o usuário confirmar a criação de um pedido, mantenha `is_order_intent`.
 
 **Campos Obrigatórios para CRIAR PEDIDO (is_order_intent = true):**
-Para que o pedido seja considerado completo para CRIAÇÃO INICIAL, apenas os dados do cabeçalho são necessários:
+Para que o pedido seja considerado completo para CRIAÇÃO INICIAL, os seguintes dados são OBRIGATÓRIOS:
 1. **nome_cliente**: String.
-2. **data_entrega**: Data (YYYY-MM-DD). Se não informado, pergunte. Se "hoje", use {date.today()}.
+2. **numero_pedido**: Inteiro. (Se não informado, PERGUNTE).
+3. **data_pedido**: Data (YYYY-MM-DD). (Se não informado, PERGUNTE).
+4. **data_entrega**: Data (YYYY-MM-DD). (Se não informado, PERGUNTE).
+5. **preco_total**: Float. (Se não informado, PERGUNTE).
+6. **icms**: Float (Porcentagem ou valor). (Se não informado, PERGUNTE).
+
 *Nota: As peças NÃO são obrigatórias nesta etapa. Elas serão pedidas DEPOIS.*
 
+**Regras para ADICIONAR PEÇAS (is_add_part_intent = true):**
+- Acionado quando o usuário quer cadastrar peças em um pedido.
+- **Campos Obrigatórios:**
+  1. **nome_peca**: String.
+  2. **quantidade**: Inteiro.
+  3. **nome_cliente**: String (Pode ser herdado do pedido se houver contexto).
+  4. **codigo_op**: String (Se não houver um pedido recém-criado no contexto, o usuário DEVE informar).
+- Se faltar algum dado, liste em `missing_fields`.
+
 **Regras Gerais:**
-- Para 'icms', se não informado, assuma 0.
 - Para 'previsao_entrega', se não informado, assuma igual à 'data_entrega'.
 - Para 'preco_total': Extraia apenas o número. Ex: "1500 reais" -> 1500.00.
-- Para 'data_pedido': Se não mencionado, use null (o sistema preencherá).
 - **Para DELETAR:** 'delete_target' ("order"/"part"), 'delete_query'.
 - **Para EDITAR:** 'update_target', 'update_query', 'update_fields'.
 - **Para BUSCAR (is_search_intent):**
@@ -140,9 +95,27 @@ Para que o pedido seja considerado completo para CRIAÇÃO INICIAL, apenas os da
 **RESOLUÇÃO DE CONTEXTO (CRÍTICO):**
 - Se o usuário disser "mude o valor", "qual o nome do cliente", "delete isso", ou qualquer referência a algo mencionado anteriormente:
   - OLHE O **Histórico Recente**.
-  - Identifique sobre qual pedido ou peça o ASSISTENTE falou por último.
+  - Identifique sobre qual pedido ou peça o ASSISTENTE falou por último (ou listou em uma busca).
+  - Se houve uma busca recente com vários resultados, e o usuário escolher um (ex: "edite o niple"), extraia "niple" como `update_query`.
   - Extraia o ID, Código OP ou Nome desse item do histórico e use como 'update_target'/'update_query' ou 'search_query'.
   - Exemplo: Histórico tem "Pedido 123 do João". Usuário diz "mude o valor para 500". -> is_update_intent=true, update_query="123", update_fields={{"preco_total": 500}}.
+
+**Regras para ATUALIZAÇÃO (is_update_intent = true):**
+- **PRÉ-REQUISITO:** O item a ser editado deve estar claro (pelo nome, ID, ou contexto recente).
+- **CENÁRIO 1: Busca Necessária Primeiro**
+  - Se o usuário disser "quero editar uma peça do cliente Yuri" (genérico) e NÃO houver peças desse cliente no histórico recente:
+    - Defina `is_search_intent` = true.
+    - `search_query` = "Yuri".
+    - Motivo: Precisamos encontrar as peças antes de saber qual editar.
+- **CENÁRIO 2: Edição Direta ou com Contexto**
+  - Se o usuário disser "editar peça niple" (específico) OU se já houver uma lista de peças no contexto e ele disser "edite a peça niple":
+    - Defina `is_update_intent` = true.
+    - `update_target` = "part" (ou "order" se for pedido).
+    - `update_query` = "niple".
+    - Se houver `codigo_op` na frase, extraia também.
+- **CENÁRIO 3: Valores da Edição**
+  - Se o usuário der os novos valores (ex: "para 50"), coloque em `update_fields`.
+  - Se NÃO der os valores, deixe `update_fields` vazio (o sistema perguntará).
 
 **Saída JSON:**
 Retorne APENAS um JSON com a seguinte estrutura:
@@ -157,10 +130,12 @@ Retorne APENAS um JSON com a seguinte estrutura:
   "delete_query": "string ou null",
   "update_target": "string ou null",
   "update_query": "string ou null",
+  "codigo_op": "string ou null (OP para filtrar atualização/busca se citado)",
   "update_fields": {{ ... }},
+  "target_op": "string ou null (OP alvo para adicionar peças, se citado)",
   "data": {{ ... objeto com todos os campos acumulados ... }},
-  "parts_data": [ ... lista de objetos {{ "nome_peca":Str, "quantidade":Int, "preco_unitario":Float }} se houver intenção de adicionar peças ... ],
-  "missing_fields": [ ... lista de strings com os nomes dos campos OBRIGATÓRIOS (apenas cliente/data) que AINDA faltam ... ],
+  "parts_data": [ ... lista de objetos {{ "nome_peca":Str, "quantidade":Int, "nome_cliente":Str, "preco_unitario":Float }} ... ],
+  "missing_fields": [ ... lista de strings com os nomes dos campos OBRIGATÓRIOS (nome_cliente, numero_pedido, data_pedido, data_entrega, preco_total, icms) que AINDA faltam ... ],
   "missing_message": "Pergunta curta e natural pedindo os dados que faltam. Null se não faltar nada."
 }}
 """
@@ -245,6 +220,8 @@ def generate_agent_response(user_message, action_result, context_data=None):
     4. Se o sistema pedir confirmação (ex: "awaiting_confirmation"), pergunte ao usuário claramente.
     5. Se houve erro, explique de forma simples.
     6. NÃO invente dados que não estão no resultado.
+    7. **CRÍTICO:** Se a ação foi "create_order" com sucesso, VOCÊ É OBRIGADO a perguntar se o usuário deseja cadastrar peças para esse pedido.
+    8. **CRÍTICO:** Se o status for "confirmation_needed" (para criar pedido), NÃO pergunte sobre peças ainda. Pergunte APENAS se pode confirmar a criação do pedido.
     
     Gere APENAS o texto da resposta.
     """

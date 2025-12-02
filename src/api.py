@@ -17,8 +17,6 @@ from typing import Optional, Dict, Any
 from src.tools import (
     extract_data_from_message,
     extract_parts_from_message,
-    extract_text_from_pdf,
-    extract_data_with_ai,
     generate_agent_response,
     get_chat_response
 )
@@ -364,7 +362,18 @@ def chat_endpoint(req: ChatRequest):
                     else:
                         action_result = {"status": "success", "type": "search_results", "query": query, "orders": orders, "parts": parts}
                         msg = generate_agent_response(message, action_result)
-                        response_obj = ChatResponse(response=msg, action="search_result", data={"orders": orders, "parts": parts})
+                        
+                        new_ctx = {}
+                        # Save all results for context refinement
+                        new_ctx["last_search_results"] = {"orders": orders, "parts": parts}
+                        
+                        # If single result, save as active item for future context
+                        if len(orders) == 1 and not parts:
+                            new_ctx["last_active_item"] = {"type": "order", "data": orders[0]}
+                        elif len(parts) == 1 and not orders:
+                            new_ctx["last_active_item"] = {"type": "part", "data": parts[0]}
+                            
+                        response_obj = ChatResponse(response=msg, action="search_result", data={"orders": orders, "parts": parts}, new_context=new_ctx)
 
             # --- DELETE INTENT ---
             elif extraction.get("is_delete_intent"):
@@ -428,7 +437,12 @@ def chat_endpoint(req: ChatRequest):
                         # Trigger n8n
                         trigger_n8n_webhook({"event": "new_order", "codigo_op": codigo_op, "data": order_payload})
                         
-                        action_result = {"status": "success", "action": "create_order", "codigo_op": codigo_op, "message": "Order created. Now asking for parts."}
+                        action_result = {
+                            "status": "success", 
+                            "action": "create_order", 
+                            "codigo_op": codigo_op, 
+                            "message": "PEDIDO CRIADO COM SUCESSO. AGORA VOCÊ DEVE PERGUNTAR: 'Deseja cadastrar as peças para este pedido agora?'"
+                        }
                         msg = generate_agent_response(message, action_result)
                         
                         # Set active order in context to allow adding parts next
@@ -456,14 +470,23 @@ def chat_endpoint(req: ChatRequest):
             elif extraction.get("is_add_part_intent"):
                 parts_data = extraction.get("parts_data", [])
                 active_op = state.get("active_order_op")
+                target_op = extraction.get("target_op")
+                
+                # If user specified an OP, use it. Otherwise fallback to context.
+                if target_op:
+                    active_op = target_op
                 
                 if not active_op:
-                    # Try to find if user mentioned an OP in the message, otherwise fail
-                    msg = generate_agent_response(message, {"status": "error", "message": "Nenhum pedido ativo para adicionar peças."})
+                    msg = generate_agent_response(message, {"status": "error", "message": "Para qual Ordem de Pedido (OP) você deseja adicionar peças? Por favor, informe o código da OP."})
                     response_obj = ChatResponse(response=msg)
                 elif not parts_data:
-                    msg = generate_agent_response(message, {"status": "error", "message": "Não entendi quais peças adicionar."})
-                    response_obj = ChatResponse(response=msg)
+                    # Check if we have missing fields for parts
+                    missing = extraction.get("missing_fields", [])
+                    if missing:
+                         response_obj = ChatResponse(response=extraction.get("missing_message", "Faltam dados para a peça."))
+                    else:
+                        msg = generate_agent_response(message, {"status": "error", "message": "Não entendi quais peças adicionar."})
+                        response_obj = ChatResponse(response=msg)
                 else:
                     # Fetch order details for context
                     order_res = supabase.table("ordem_pedido").select("*").eq("codigo_op", active_op).execute()
@@ -473,7 +496,10 @@ def chat_endpoint(req: ChatRequest):
                         for p in parts_data:
                             p["codigo_op"] = active_op
                             p["status"] = "Pendente"
-                            p["nome_cliente"] = order_info["nome_cliente"]
+                            # Use client from order if not provided in part
+                            if not p.get("nome_cliente"):
+                                p["nome_cliente"] = order_info["nome_cliente"]
+                            
                             p["data_entrega"] = order_info["data_entrega"]
                             p["pecas_produzidas"] = 0
                             parts_payload.append(p)
@@ -485,8 +511,96 @@ def chat_endpoint(req: ChatRequest):
                         # Keep active_op in context to allow adding more parts
                         response_obj = ChatResponse(response=msg, new_context={"active_order_op": active_op})
                     else:
-                        msg = generate_agent_response(message, {"status": "error", "message": "Pedido não encontrado."})
+                        msg = generate_agent_response(message, {"status": "error", "message": f"Pedido {active_op} não encontrado."})
                         response_obj = ChatResponse(response=msg, new_context={})
+
+            # --- UPDATE INTENT ---
+            elif extraction.get("is_update_intent"):
+                target = extraction.get("update_target") or "any"
+                query = extraction.get("update_query")
+                op_filter = extraction.get("codigo_op") # New field
+                fields = extraction.get("update_fields", {})
+                
+                if state.get("awaiting_update_confirmation"):
+                    if any(k in message.lower() for k in ["sim", "s", "yes", "confirm"]):
+                        candidate = state.get("update_candidate")
+                        if candidate:
+                            if candidate["type"] == "order":
+                                supabase.table("ordem_pedido").update(candidate["fields"]).eq("codigo_op", candidate["data"]["codigo_op"]).execute()
+                            else:
+                                supabase.table("pecas").update(candidate["fields"]).eq("id_peca", candidate["data"]["id_peca"]).execute()
+                            
+                            action_result = {"status": "success", "action": "update", "item": candidate["data"], "fields": candidate["fields"]}
+                            msg = generate_agent_response(message, action_result)
+                            response_obj = ChatResponse(response=msg, new_context={})
+                        else:
+                            response_obj = ChatResponse(response="Erro: Contexto de atualização perdido.")
+                    else:
+                        msg = generate_agent_response(message, {"status": "cancelled", "action": "update"})
+                        response_obj = ChatResponse(response=msg, new_context={})
+                else:
+                    # Search logic for update
+                    orders = []
+                    parts = []
+                    
+                    # If no query, try to use context
+                    if not query and state.get("last_active_item"):
+                        last_item = state.get("last_active_item")
+                        if last_item["type"] == "order":
+                            orders = [last_item["data"]]
+                        else:
+                            parts = [last_item["data"]]
+                    
+                    elif query:
+                        # Check if we have previous search results to filter from
+                        last_results = state.get("last_search_results")
+                        if last_results:
+                            # Filter locally first
+                            if target in ["part", "any"] and "parts" in last_results:
+                                parts = [p for p in last_results["parts"] if query.lower() in p["nome_peca"].lower()]
+                            if target in ["order", "any"] and "orders" in last_results:
+                                orders = [o for o in last_results["orders"] if query.lower() in o["nome_cliente"].lower() or query in o["codigo_op"]]
+                        
+                        # If local filter didn't find anything (or no context), go to DB
+                        if not parts and not orders:
+                            if target in ["order", "any"]:
+                                q = supabase.table("ordem_pedido").select("*").or_(f"codigo_op.eq.{query},nome_cliente.ilike.%{query}%")
+                                if op_filter: q = q.eq("codigo_op", op_filter)
+                                orders = q.execute().data
+                                
+                            if target in ["part", "any"]:
+                                # Try exact match first for ID if query is int, else name
+                                if query.isdigit():
+                                     parts = supabase.table("pecas").select("*").eq("id_peca", query).execute().data
+                                if not parts:
+                                     # Use ilike directly instead of or_ to handle spaces in names better
+                                     q = supabase.table("pecas").select("*").ilike("nome_peca", f"%{query}%")
+                                     if op_filter: q = q.eq("codigo_op", op_filter)
+                                     parts = q.execute().data
+                    
+                    total = len(orders) + len(parts)
+                    
+                    if total == 1:
+                        item = orders[0] if orders else parts[0]
+                        item_type = "order" if orders else "part"
+                        
+                        action_result = {"status": "confirmation_needed", "action": "update", "item": item, "item_type": item_type, "fields": fields}
+                        msg = generate_agent_response(message, action_result)
+                        
+                        response_obj = ChatResponse(
+                            response=msg, 
+                            new_context={
+                                "awaiting_update_confirmation": True, 
+                                "update_candidate": {"type": item_type, "data": item, "fields": fields}
+                            }
+                        )
+                    elif total == 0:
+                        msg = generate_agent_response(message, {"status": "not_found", "query": query or "contexto", "action": "update"})
+                        response_obj = ChatResponse(response=msg)
+                    else:
+                        # Too many results
+                        msg = generate_agent_response(message, {"status": "multiple_found", "count": total, "query": query, "action": "update"})
+                        response_obj = ChatResponse(response=msg)
 
             # --- DEFAULT ---
             if not response_obj:
@@ -508,8 +622,11 @@ def chat_endpoint(req: ChatRequest):
                 if len(history_objs) > 20:
                     history_objs = history_objs[-20:]
                 
-                # Update State
-                new_state = response_obj.new_context if response_obj.new_context is not None else state
+                # Update State - MERGE new context into existing state to preserve history
+                if response_obj.new_context is not None:
+                    new_state = {**state, **response_obj.new_context}
+                else:
+                    new_state = state
                 
                 # Upsert session
                 supabase.table("chat_sessions").upsert({

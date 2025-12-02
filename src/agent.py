@@ -113,6 +113,12 @@ class ProductionAgent:
             
         elif confirm_type == "update":
             return self._finalize_update()
+            
+        elif confirm_type == "post_order_parts":
+            # User said YES to adding parts.
+            # We don't have parts yet, so we just acknowledge and guide them.
+            self.state["awaiting_confirmation"] = None
+            return {"response": "Ótimo! Por favor, informe as peças que deseja adicionar (Nome e Quantidade)."}
 
         return {"response": "Erro de estado."}
 
@@ -136,7 +142,10 @@ class ProductionAgent:
                 return {"response": msg}
             else:
                 self._reset_state()
-                return {"response": f"✅ **Ordem (OP) criada! Código: `{op_code}`**\n\nSem peças para cadastrar."}
+                # Keep the OP in context and wait for confirmation
+                self.state["current_op"] = op_code 
+                self.state["awaiting_confirmation"] = "post_order_parts"
+                return {"response": f"✅ **Ordem (OP) criada! Código: `{op_code}`**\n\nDeseja cadastrar as peças para este pedido agora?"}
         else:
             err = res.text if res else "Erro desconhecido"
             return {"response": f"Erro ao criar ordem: {err}"}

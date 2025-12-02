@@ -6,5 +6,4 @@ python-dotenv
 requests
 httpx
 openai
-pypdf
-redis
+
