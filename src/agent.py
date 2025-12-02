@@ -14,6 +14,15 @@ from tools import (
     update_order,
     update_part
 )
+from templates import (
+    format_order_confirmation,
+    format_parts_confirmation,
+    format_update_confirmation,
+    format_update_success,
+    format_delete_confirmation,
+    format_delete_success,
+    format_search_results
+)
 
 class ProductionAgent:
     def __init__(self):
@@ -78,7 +87,7 @@ class ProductionAgent:
         elif extraction_result.get("is_add_part_intent"):
              # Logic to add parts to existing order context could go here
              # For now, let's treat it as general or part of order flow
-             pass
+            return self._handle_add_part_intent(extraction_result)
 
         # Default fallback - Conversational AI
         chat_response = get_chat_response(user_message, chat_history)
@@ -177,7 +186,7 @@ class ProductionAgent:
             
         self._reset_state()
         if res and res.status_code == 200:
-            return {"response": "✅ Item deletado com sucesso!"}
+            return {"response": format_delete_success(f"Pedido {candidate['data']['codigo_op']}" if candidate["type"] == "order" else f"Peça {candidate['data']['nome_peca']}")}
         else:
             return {"response": "❌ Erro ao deletar item."}
 
@@ -192,7 +201,7 @@ class ProductionAgent:
             
         self._reset_state()
         if res and res.status_code == 200:
-            return {"response": "✅ Item atualizado com sucesso!"}
+            return {"response": format_update_success(f"Pedido {candidate['data']['codigo_op']}" if candidate["type"] == "order" else f"Peça {candidate['data']['nome_peca']}")}
         else:
             return {"response": "❌ Erro ao atualizar item."}
 
@@ -204,16 +213,7 @@ class ProductionAgent:
             self.state["current_data"] = data
             self.state["awaiting_confirmation"] = "order"
             
-            msg = f"""📝 **Pedido Completo!**
-            
-**Dados identificados:**
-- 👤 Cliente: {data.get('nome_cliente')}
-- 📋 Pedido nº: {data.get('numero_pedido')}
-- 📅 Data do Pedido: {data.get('data_pedido')}
-- 🚚 Data de Entrega: {data.get('data_entrega')}
-- 💰 Valor Total: R$ {data.get('preco_total', 0):.2f}
-
-Deseja criar a Ordem de Produção com estes dados?"""
+            msg = format_order_confirmation(data)
             return {"response": msg}
         else:
             # Update current partial data
@@ -229,18 +229,7 @@ Deseja criar a Ordem de Produção com estes dados?"""
         if not orders and not parts:
             return {"response": f"❌ Nenhum resultado encontrado para '{query}'."}
             
-        msg = f"✅ **Resultados para '{query}':**\n\n"
-        
-        if orders:
-            msg += "**📋 Pedidos Encontrados:**\n"
-            for o in orders:
-                msg += f"**🔹 OP:** `{o['codigo_op']}` | **Cliente:** {o['nome_cliente']} | **Status:** {o['status']}\n"
-                
-        if parts:
-            msg += "\n**📦 Peças Encontradas:**\n"
-            for p in parts:
-                msg += f"- **Peça:** {p['nome_peca']} | **OP:** `{p['codigo_op']}`\n"
-                
+        msg = format_search_results(query, orders, parts)
         return {"response": msg}
 
     def _handle_delete_intent(self, result):
@@ -263,11 +252,11 @@ Deseja criar a Ordem de Produção com estes dados?"""
             if candidates_orders:
                 item = candidates_orders[0]
                 self.state["candidate"] = {"type": "order", "data": item}
-                msg = f"⚠️ **Confirmar exclusão?**\n\n**Pedido:** {item['codigo_op']} | **Cliente:** {item['nome_cliente']}"
+                msg = format_delete_confirmation("Pedido", item['codigo_op'], f"Cliente: {item['nome_cliente']}")
             else:
                 item = candidates_parts[0]
                 self.state["candidate"] = {"type": "part", "data": item}
-                msg = f"⚠️ **Confirmar exclusão?**\n\n**Peça:** {item['nome_peca']} | **OP:** {item['codigo_op']}"
+                msg = format_delete_confirmation("Peça", item['nome_peca'], f"OP: {item['codigo_op']}")
             
             self.state["awaiting_confirmation"] = "delete"
             return {"response": msg}
@@ -303,13 +292,11 @@ Deseja criar a Ordem de Produção com estes dados?"""
             if candidates_orders:
                 item = candidates_orders[0]
                 self.state["candidate"] = {"type": "order", "data": item, "fields": fields}
-                changes = ", ".join([f"{k}: {v}" for k,v in fields.items()])
-                msg = f"⚠️ **Confirmar alteração?**\n\n**Pedido:** {item['codigo_op']}\n**Mudanças:** {changes}"
+                msg = format_update_confirmation("Pedido", item['codigo_op'], fields)
             else:
                 item = candidates_parts[0]
                 self.state["candidate"] = {"type": "part", "data": item, "fields": fields}
-                changes = ", ".join([f"{k}: {v}" for k,v in fields.items()])
-                msg = f"⚠️ **Confirmar alteração?**\n\n**Peça:** {item['nome_peca']}\n**Mudanças:** {changes}"
+                msg = format_update_confirmation("Peça", item['nome_peca'], fields)
                 
             self.state["awaiting_confirmation"] = "update"
             return {"response": msg}
@@ -332,6 +319,38 @@ Deseja criar a Ordem de Produção com estes dados?"""
         
         self.state["partial_update"] = None # Clear partial
         return self._handle_update_intent(result)
+
+    def _handle_add_part_intent(self, result):
+        data = result.get("data", {})
+        parts = result.get("parts_data", [])
+        missing = result.get("missing_fields", [])
+        
+        # If the prompt identified missing fields for the part/client context
+        if missing:
+            question = result.get("missing_message") or f"Faltam dados para adicionar a peça: {', '.join(missing)}."
+            return {"response": question}
+
+        # If we have parts data but no context of which order/client
+        client_name = data.get("nome_cliente")
+        
+        if not self.state["current_op"] and not client_name:
+             return {"response": "Para qual cliente ou ordem você deseja adicionar essas peças?"}
+
+        # If we have parts and are ready to add
+        if parts:
+            self.state["pending_parts"] = parts
+            
+            # We might need to store the client_name to find the OP later if current_op is null
+            if client_name:
+                self.state["current_data"] = {"nome_cliente": client_name} 
+            
+            msg = format_parts_confirmation(client_name if client_name else "Atual", self.state.get("current_op", "N/A"), parts)
+            
+            self.state["awaiting_confirmation"] = "parts"
+            
+            return {"response": msg}
+            
+        return {"response": "Não identifiquei as peças. Poderia repetir?"}
 
     def _reset_state(self):
         self.state = {

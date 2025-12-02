@@ -20,6 +20,15 @@ from src.tools import (
     generate_agent_response,
     get_chat_response
 )
+from src.templates import (
+    format_order_confirmation,
+    format_parts_confirmation,
+    format_update_confirmation,
+    format_update_success,
+    format_delete_confirmation,
+    format_delete_success,
+    format_search_results
+)
 
 
 import json
@@ -361,7 +370,7 @@ def chat_endpoint(req: ChatRequest):
                         response_obj = ChatResponse(response=msg)
                     else:
                         action_result = {"status": "success", "type": "search_results", "query": query, "orders": orders, "parts": parts}
-                        msg = generate_agent_response(message, action_result)
+                        msg = format_search_results(query, orders, parts)
                         
                         new_ctx = {}
                         # Save all results for context refinement
@@ -389,7 +398,7 @@ def chat_endpoint(req: ChatRequest):
                         else:
                             supabase.table("pecas").delete().eq("id_peca", candidate["data"]["id_peca"]).execute()
                         
-                        msg = generate_agent_response(message, {"status": "success", "type": "delete", "item": candidate})
+                        msg = format_delete_success(f"Pedido {candidate['data']['codigo_op']}" if candidate["type"] == "order" else f"Peça {candidate['data']['nome_peca']}")
                         response_obj = ChatResponse(response=msg, new_context={})
                     else:
                         msg = generate_agent_response(message, {"status": "cancelled", "type": "delete"})
@@ -408,7 +417,7 @@ def chat_endpoint(req: ChatRequest):
                         item = orders[0] if orders else parts[0]
                         item_type = "order" if orders else "part"
                         action_result = {"status": "confirmation_needed", "action": "delete", "item": item, "item_type": item_type}
-                        msg = generate_agent_response(message, action_result)
+                        msg = format_delete_confirmation("Pedido" if item_type == "order" else "Peça", item['codigo_op'] if item_type == "order" else item['nome_peca'], f"Cliente: {item['nome_cliente']}" if item_type == "order" else f"OP: {item['codigo_op']}")
                         response_obj = ChatResponse(response=msg, new_context={"awaiting_delete_confirmation": True, "delete_candidate": {"type": item_type, "data": item}})
                     elif total == 0:
                         msg = generate_agent_response(message, {"status": "not_found", "query": query, "action": "delete"})
@@ -443,7 +452,7 @@ def chat_endpoint(req: ChatRequest):
                             "codigo_op": codigo_op, 
                             "message": "PEDIDO CRIADO COM SUCESSO. AGORA VOCÊ DEVE PERGUNTAR: 'Deseja cadastrar as peças para este pedido agora?'"
                         }
-                        msg = generate_agent_response(message, action_result)
+                        msg = f"✅ **Ordem (OP) criada! Código: `{codigo_op}`**\n\nDeseja cadastrar as peças para este pedido agora?"
                         
                         # Set active order in context to allow adding parts next
                         response_obj = ChatResponse(response=msg, new_context={"active_order_op": codigo_op, "partial_data": {}})
@@ -456,7 +465,7 @@ def chat_endpoint(req: ChatRequest):
                 if not response_obj:
                     if not missing:
                         action_result = {"status": "confirmation_needed", "action": "create_order", "data": data}
-                        msg = generate_agent_response(message, action_result)
+                        msg = format_order_confirmation(data)
                         response_obj = ChatResponse(response=msg, new_context={"awaiting_create_confirmation": True, "partial_data": data})
                     else:
                         if extraction.get("missing_message"):
@@ -507,7 +516,7 @@ def chat_endpoint(req: ChatRequest):
                         supabase.table("pecas").insert(parts_payload).execute()
                         
                         action_result = {"status": "success", "action": "add_parts", "count": len(parts_payload), "codigo_op": active_op}
-                        msg = generate_agent_response(message, action_result)
+                        msg = f"✅ **Peças cadastradas com sucesso!**\n\nO sistema agora está monitorando esta produção."
                         # Keep active_op in context to allow adding more parts
                         response_obj = ChatResponse(response=msg, new_context={"active_order_op": active_op})
                     else:
@@ -531,7 +540,7 @@ def chat_endpoint(req: ChatRequest):
                                 supabase.table("pecas").update(candidate["fields"]).eq("id_peca", candidate["data"]["id_peca"]).execute()
                             
                             action_result = {"status": "success", "action": "update", "item": candidate["data"], "fields": candidate["fields"]}
-                            msg = generate_agent_response(message, action_result)
+                            msg = format_update_success(f"Pedido {candidate['data']['codigo_op']}" if candidate["type"] == "order" else f"Peça {candidate['data']['nome_peca']}")
                             response_obj = ChatResponse(response=msg, new_context={})
                         else:
                             response_obj = ChatResponse(response="Erro: Contexto de atualização perdido.")
@@ -554,12 +563,18 @@ def chat_endpoint(req: ChatRequest):
                     elif query:
                         # Check if we have previous search results to filter from
                         last_results = state.get("last_search_results")
+                        
+                        import unicodedata
+                        def normalize_text(text):
+                            if not text: return ""
+                            return ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn').lower()
+
                         if last_results:
                             # Filter locally first
                             if target in ["part", "any"] and "parts" in last_results:
-                                parts = [p for p in last_results["parts"] if query.lower() in p["nome_peca"].lower()]
+                                parts = [p for p in last_results["parts"] if normalize_text(query) in normalize_text(p["nome_peca"])]
                             if target in ["order", "any"] and "orders" in last_results:
-                                orders = [o for o in last_results["orders"] if query.lower() in o["nome_cliente"].lower() or query in o["codigo_op"]]
+                                orders = [o for o in last_results["orders"] if normalize_text(query) in normalize_text(o["nome_cliente"]) or query in o["codigo_op"]]
                         
                         # If local filter didn't find anything (or no context), go to DB
                         if not parts and not orders:
@@ -585,7 +600,7 @@ def chat_endpoint(req: ChatRequest):
                         item_type = "order" if orders else "part"
                         
                         action_result = {"status": "confirmation_needed", "action": "update", "item": item, "item_type": item_type, "fields": fields}
-                        msg = generate_agent_response(message, action_result)
+                        msg = format_update_confirmation("Pedido" if item_type == "order" else "Peça", item['codigo_op'] if item_type == "order" else item['nome_peca'], fields)
                         
                         response_obj = ChatResponse(
                             response=msg, 
