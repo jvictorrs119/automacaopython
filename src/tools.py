@@ -142,7 +142,7 @@ Retorne APENAS um JSON com a seguinte estrutura:
 
     try:
         client = get_openai_client()
-        if not client: return None
+        if not client: return None, 0
 
         response = client.chat.completions.create(
             model="gpt-4.1-mini-2025-04-14",
@@ -153,6 +153,11 @@ Retorne APENAS um JSON com a seguinte estrutura:
             temperature=0.1
         )
         
+        # Capture token usage
+        tokens_used = 0
+        if response.usage:
+            tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
+        
         result = response.choices[0].message.content.strip()
         
         if result.startswith("```"):
@@ -160,10 +165,10 @@ Retorne APENAS um JSON com a seguinte estrutura:
             if result.startswith("json"):
                 result = result[4:]
         
-        return json.loads(result)
+        return json.loads(result), tokens_used
         
     except Exception as e:
-        return None
+        return None, 0
 
 def extract_parts_from_message(user_message):
     """Extract just parts list from message"""
@@ -199,6 +204,7 @@ def generate_agent_response(user_message, action_result, context_data=None):
     """
     Generates a natural language response for the user based on the action result.
     This ensures the agent follows the persona and instructions.
+    Returns: (response_text, tokens_used)
     """
     
     prompt = f"""
@@ -216,7 +222,8 @@ def generate_agent_response(user_message, action_result, context_data=None):
     **Instruções:**
     1. Responda de forma natural, amigável e profissional.
     2. Use emojis para tornar a mensagem visualmente agradável (🏭, ✅, ⚠️, 📦, etc).
-    3. Se o resultado for uma lista de itens (busca), formate-os de forma clara (ex: bullet points).
+    3. Use APENAS um asterisco (*) para negrito, NUNCA use dois (**).
+    4. Se o resultado for uma lista de itens (busca), formate-os de forma clara (ex: bullet points).
     4. Se o sistema pedir confirmação (ex: "awaiting_confirmation"), pergunte ao usuário claramente.
     5. Se houve erro, explique de forma simples.
     6. NÃO invente dados que não estão no resultado.
@@ -228,16 +235,21 @@ def generate_agent_response(user_message, action_result, context_data=None):
     
     try:
         client = get_openai_client()
-        if not client: return "Desculpe, serviço de IA indisponível."
+        if not client: return "Desculpe, serviço de IA indisponível.", 0
 
         response = client.chat.completions.create(
             model="gpt-4.1-mini-2025-04-14",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7
         )
-        return response.choices[0].message.content.strip()
+        
+        tokens_used = 0
+        if response.usage:
+            tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
+        
+        return response.choices[0].message.content.strip(), tokens_used
     except Exception as e:
-        return "Desculpe, não consegui gerar uma resposta agora."
+        return "Desculpe, não consegui gerar uma resposta agora.", 0
 
 def fetch_alerts():
     """Fetch alerts from API"""
@@ -357,10 +369,10 @@ def delete_part(part_id):
 
 
 def get_chat_response(message, history=[]):
-    """Generate a natural conversational response"""
+    """Generate a natural conversational response. Returns: (response_text, tokens_used)"""
     try:
         client = get_openai_client()
-        if not client: return "Desculpe, serviço indisponível."
+        if not client: return "Desculpe, serviço indisponível.", 0
 
         # Format history
         history_str = ""
@@ -388,6 +400,11 @@ def get_chat_response(message, history=[]):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7
         )
-        return response.choices[0].message.content.strip()
+        
+        tokens_used = 0
+        if response.usage:
+            tokens_used = response.usage.prompt_tokens + response.usage.completion_tokens
+        
+        return response.choices[0].message.content.strip(), tokens_used
     except Exception as e:
-        return "Desculpe, não consegui processar sua mensagem."
+        return "Desculpe, não consegui processar sua mensagem.", 0
