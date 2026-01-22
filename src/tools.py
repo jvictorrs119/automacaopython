@@ -33,7 +33,7 @@ def extract_data_from_message(message, current_data, history=[]):
             history_str = "\n".join(history)
 
     prompt = f"""
-Você é um assistente especializado em extrair dados de pedidos de produção.
+Você é um assistente especializado em extrair dados de pedidos de produção e catálogo de itens.
 Analise a mensagem do usuário e o contexto atual para identificar a intenção e extrair dados.
 
 **Dados Atuais (Contexto):**
@@ -50,26 +50,58 @@ Analise a mensagem do usuário e o contexto atual para identificar a intenção 
    - Se o usuário disser apenas "sim", "ok", "confirmo", "não", "cancelar":
      - Verifique o **Histórico Recente**. Se a última ação do assistente foi pedir confirmação para CRIAR PEDIDO, defina `is_order_intent` = true.
      - Se foi pedir confirmação para DELETAR, defina `is_delete_intent` = true.
+     - Se foi pedir confirmação para CRIAR ITEM NO CATÁLOGO, defina `is_catalog_intent` = true.
 
-2. **ADICIONAR PEÇAS (is_add_part_intent):**
+2. **CATÁLOGO DE ITENS (is_catalog_intent):**
+   - Acionado quando o usuário quer criar, buscar, editar ou deletar itens do CATÁLOGO.
+   - Palavras-chave: "catálogo", "catalogo", "item consumível", "matéria prima", "produto final", "inventário", "cadastrar item", "criar item no catálogo".
+   - **Tipos válidos de itens no catálogo:**
+     - "Produto Final" - peças que a empresa produz (REQUER tempo_producao)
+     - "Itens Consumíveis" - materiais de consumo
+     - "Matérias Primas" - materiais brutos
+     - "Inventário" - outros itens em estoque
+   - **Campos para criar item no catálogo:**
+     - **nome**: String (OBRIGATÓRIO)
+     - **preco**: Float (OBRIGATÓRIO)
+     - **tipo**: String (OBRIGATÓRIO) - deve ser um dos 4 tipos acima
+     - **tempo_producao**: Int (OBRIGATÓRIO apenas se tipo = "Produto Final")
+   - **Operações:**
+     - `catalog_action` = "create" | "search" | "update" | "delete" | "list"
+   - **Exemplos:**
+     - "crie um item no catalogo com broca, 1500, item consumivel" -> is_catalog_intent=true, catalog_action="create", catalog_data={{"nome": "broca", "preco": 1500, "tipo": "Itens Consumíveis"}}
+     - "adicionar parafuso no catálogo, preço 5 reais, matéria prima" -> is_catalog_intent=true, catalog_action="create", catalog_data={{"nome": "parafuso", "preco": 5, "tipo": "Matérias Primas"}}
+     - "cadastrar produto final niple, 50 reais, tempo de produção 30 minutos" -> is_catalog_intent=true, catalog_action="create", catalog_data={{"nome": "niple", "preco": 50, "tipo": "Produto Final", "tempo_producao": 30}}
+
+3. **ADICIONAR PEÇAS (is_add_part_intent):**
    - Se o contexto tiver um `active_order_op` (ou se o usuário mencionar um número de pedido existente) e o usuário listar peças (nome, quantidade), isso é `is_add_part_intent`.
    - Exemplo: "Adicionar 10 peças X", "Peça Y: 5 unidades".
 
-3. **CRIAR PEDIDO (is_order_intent):**
+4. **CRIAR PEDIDO (is_order_intent):**
    - "crie uma op para [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
    - "pedido do [CLIENTE]" -> Extraia [CLIENTE] como 'nome_cliente'.
    - Se o usuário confirmar a criação de um pedido, mantenha `is_order_intent`.
+   - **IMPORTANTE:** Se a mensagem contiver um documento de Purchase Order (PO) ou texto com itens/peças listados, EXTRAIA também as peças encontradas.
 
 **Campos Obrigatórios para CRIAR PEDIDO (is_order_intent = true):**
 Para que o pedido seja considerado completo para CRIAÇÃO INICIAL, os seguintes dados são OBRIGATÓRIOS:
-1. **nome_cliente**: String.
-2. **numero_pedido**: Inteiro. (Se não informado, PERGUNTE).
-3. **data_pedido**: Data (YYYY-MM-DD). (Se não informado, PERGUNTE).
-4. **data_entrega**: Data (YYYY-MM-DD). (Se não informado, PERGUNTE).
-5. **preco_total**: Float. (Se não informado, PERGUNTE).
-6. **icms**: Float (Porcentagem ou valor). (Se não informado, PERGUNTE).
+1. **nome_cliente**: String. (Ex: "Sold to:", "Ship to:", nome da empresa cliente)
+2. **numero_pedido**: String ou Inteiro. (Ex: "Purchase order number:", "PO number")
+3. **data_pedido**: Data (YYYY-MM-DD). (Ex: "Purchase order date:")
+4. **previsao_entrega**: Data (YYYY-MM-DD). (Ex: "Delivery Date", "Data prevista de entrega")
+5. **preco_total**: Float. (Ex: "Total value including taxes", "Subtotal Net price")
+6. **icms**: Float (Porcentagem ou valor). (Ex: "ICMS.Deductible")
 
-*Nota: As peças NÃO são obrigatórias nesta etapa. Elas serão pedidas DEPOIS.*
+*Nota: O campo 'data_entrega' (data real da entrega) NÃO é solicitado na criação, pois será preenchido apenas quando a entrega for realizada.*
+
+**EXTRAÇÃO DE PEÇAS EM PEDIDOS (CRÍTICO):**
+- Se a mensagem contiver itens/peças listados (comum em Purchase Orders), SEMPRE extraia-os para `parts_data`.
+- Em documentos PO, procure por linhas como: "Item", "Quantity", "Description", "Unit Net price".
+- Cada item deve ter: `nome_peca` (descrição do item), `quantidade`, `preco_unitario` (se disponível).
+- Exemplos de extração de PO:
+  - "Item 1: VALVE TBG BLDR, Quantity: 10, Unit price: 1903.50" -> parts_data=[{{"nome_peca": "VALVE TBG BLDR", "quantidade": 10, "preco_unitario": 1903.50}}]
+  - "10.000 EACH 0462754 - VALVE: TBG BLDR" -> parts_data=[{{"nome_peca": "VALVE TBG BLDR", "quantidade": 10, "preco_unitario": 0}}]
+
+*Nota: As peças NÃO são OBRIGATÓRIAS para validar o pedido, mas SE encontradas, DEVEM ser extraídas para `parts_data`.*
 
 **Regras para ADICIONAR PEÇAS (is_add_part_intent = true):**
 - Acionado quando o usuário quer cadastrar peças em um pedido.
@@ -81,9 +113,9 @@ Para que o pedido seja considerado completo para CRIAÇÃO INICIAL, os seguintes
 - Se faltar algum dado, liste em `missing_fields`.
 
 **Regras Gerais:**
-- Para 'previsao_entrega', se não informado, assuma igual à 'data_entrega'.
+- O campo 'data_entrega' (data real da entrega) NÃO deve ser solicitado na criação. Ele será NULL/vazio até a entrega ser realizada.
 - Para 'preco_total': Extraia apenas o número. Ex: "1500 reais" -> 1500.00.
-- **Para DELETAR:** 'delete_target' ("order"/"part"), 'delete_query'.
+- **Para DELETAR:** 'delete_target' ("order"/"part"/"catalog"), 'delete_query'.
 - **Para EDITAR:** 'update_target', 'update_query', 'update_fields'.
 - **Para BUSCAR (is_search_intent):**
   - O 'search_query' deve conter APENAS o termo essencial de busca.
@@ -117,6 +149,25 @@ Para que o pedido seja considerado completo para CRIAÇÃO INICIAL, os seguintes
   - Se o usuário der os novos valores (ex: "para 50"), coloque em `update_fields`.
   - Se NÃO der os valores, deixe `update_fields` vazio (o sistema perguntará).
 
+**Regras para ESTOQUE (is_stock_intent = true):**
+- Acionado quando o usuário quer adicionar, atualizar ou verificar itens no ESTOQUE.
+- Palavras-chave: "estoque", "adicionar ao estoque", "entrada no estoque", "quantidade em estoque", "atualizar estoque".
+- **IMPORTANTE:** O item DEVE existir no CATÁLOGO antes de ser adicionado ao estoque.
+- **Campos para estoque:**
+  - **nome**: String (OBRIGATÓRIO) - nome do item que deve existir no catálogo
+  - **quantidade**: Int (OBRIGATÓRIO) - quantidade a adicionar/definir
+- **Operações (`stock_action`):**
+  - "add" = adicionar quantidade ao estoque (se já existe, soma; se não, cria novo)
+  - "update" = atualizar quantidade específica
+  - "list" = listar itens do estoque
+  - "check" = verificar se item existe no catálogo e estoque
+- **Exemplos:**
+  - "adicionar 50 brocas no estoque" -> is_stock_intent=true, stock_action="add", stock_data={{"nome": "broca", "quantidade": 50}}
+  - "dar entrada de 100 parafusos" -> is_stock_intent=true, stock_action="add", stock_data={{"nome": "parafuso", "quantidade": 100}}
+  - "quantos niples tem no estoque?" -> is_stock_intent=true, stock_action="check", stock_data={{"nome": "niple"}}
+  - "listar estoque" -> is_stock_intent=true, stock_action="list"
+  - "atualizar estoque de broca para 200" -> is_stock_intent=true, stock_action="update", stock_data={{"nome": "broca", "quantidade": 200}}
+
 **Saída JSON:**
 Retorne APENAS um JSON com a seguinte estrutura:
 {{
@@ -125,6 +176,16 @@ Retorne APENAS um JSON com a seguinte estrutura:
   "is_search_intent": boolean,
   "is_delete_intent": boolean,
   "is_update_intent": boolean,
+  "is_catalog_intent": boolean,
+  "is_stock_intent": boolean,
+  "catalog_action": "create" | "search" | "update" | "delete" | "list" | null,
+  "catalog_data": {{ "nome": str, "preco": float, "tipo": str, "tempo_producao": int ou null }},
+  "catalog_missing_fields": [ ... lista de campos obrigatórios que faltam para CATÁLOGO ... ],
+  "catalog_missing_message": "Pergunta pedindo os dados do catálogo que faltam. Null se não faltar nada.",
+  "stock_action": "add" | "update" | "list" | "check" | null,
+  "stock_data": {{ "nome": str, "quantidade": int }},
+  "stock_missing_fields": [ ... lista de campos obrigatórios que faltam para ESTOQUE ... ],
+  "stock_missing_message": "Pergunta pedindo os dados do estoque que faltam. Null se não faltar nada.",
   "search_query": "string ou null",
   "delete_target": "string ou null",
   "delete_query": "string ou null",
@@ -135,7 +196,7 @@ Retorne APENAS um JSON com a seguinte estrutura:
   "target_op": "string ou null (OP alvo para adicionar peças, se citado)",
   "data": {{ ... objeto com todos os campos acumulados ... }},
   "parts_data": [ ... lista de objetos {{ "nome_peca":Str, "quantidade":Int, "nome_cliente":Str, "preco_unitario":Float }} ... ],
-  "missing_fields": [ ... lista de strings com os nomes dos campos OBRIGATÓRIOS (nome_cliente, numero_pedido, data_pedido, data_entrega, preco_total, icms) que AINDA faltam ... ],
+  "missing_fields": [ ... lista de strings com os nomes dos campos OBRIGATÓRIOS (nome_cliente, numero_pedido, data_pedido, previsao_entrega, preco_total, icms) que AINDA faltam ... ],
   "missing_message": "Pergunta curta e natural pedindo os dados que faltam. Null se não faltar nada."
 }}
 """
@@ -408,3 +469,193 @@ def get_chat_response(message, history=[]):
         return response.choices[0].message.content.strip(), tokens_used
     except Exception as e:
         return "Desculpe, não consegui processar sua mensagem.", 0
+
+
+# --- Catalog Functions ---
+
+def create_catalog_item(nome: str, preco: float, tipo: str, tempo_producao: int = None):
+    """
+    Create a new catalog item.
+    tempo_producao is required only for 'Produto Final' type.
+    """
+    try:
+        payload = {
+            "nome": nome,
+            "preco": preco,
+            "tipo": tipo
+        }
+        # Add tempo_producao only if provided (required for Produto Final)
+        if tempo_producao is not None:
+            payload["tempo_producao"] = tempo_producao
+        
+        res = requests.post(f"{API_URL}/catalogo", json=payload)
+        return res
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        class ErrorResponse:
+            status_code = 500
+            text = str(e)
+            def json(self): return {"detail": str(e)}
+        return ErrorResponse()
+
+def list_catalog_items(tipo: str = None, query: str = None):
+    """List catalog items, optionally filtered by tipo and/or search query"""
+    try:
+        params = {}
+        if tipo:
+            params["tipo"] = tipo
+        if query:
+            params["query"] = query
+        res = requests.get(f"{API_URL}/catalogo", params=params)
+        if res.status_code == 200:
+            return res.json()
+        return []
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        return []
+
+def get_catalog_item(item_id: str):
+    """Get a specific catalog item by ID"""
+    try:
+        res = requests.get(f"{API_URL}/catalogo/{item_id}")
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        return None
+
+def update_catalog_item(item_id: str, data: dict):
+    """Update a catalog item"""
+    try:
+        res = requests.put(f"{API_URL}/catalogo/{item_id}", json=data)
+        return res
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        return None
+
+def delete_catalog_item(item_id: str):
+    """Delete a catalog item"""
+    try:
+        res = requests.delete(f"{API_URL}/catalogo/{item_id}")
+        return res
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        return None
+
+def get_catalog_types():
+    """Get available catalog types"""
+    try:
+        res = requests.get(f"{API_URL}/catalogo/tipos")
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        return None
+
+def get_catalog_stats():
+    """Get catalog statistics"""
+    try:
+        res = requests.get(f"{API_URL}/catalogo/stats/resumo")
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        return None
+
+
+# --- Stock Functions (Estoque) ---
+
+def add_to_stock(nome: str, quantidade: int):
+    """
+    Add item to stock. Item must exist in catalog.
+    If already in stock, quantity is added.
+    """
+    try:
+        res = requests.post(f"{API_URL}/estoque", json={
+            "nome": nome,
+            "quantidade": quantidade
+        })
+        return res
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        class ErrorResponse:
+            status_code = 500
+            text = str(e)
+            def json(self): return {"detail": str(e)}
+        return ErrorResponse()
+
+def list_stock_items(tipo: str = None, query: str = None):
+    """List stock items, optionally filtered by tipo and/or search query"""
+    try:
+        params = {}
+        if tipo:
+            params["tipo"] = tipo
+        if query:
+            params["query"] = query
+        res = requests.get(f"{API_URL}/estoque", params=params)
+        if res.status_code == 200:
+            return res.json()
+        return []
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        return []
+
+def get_stock_item(item_id: str):
+    """Get a specific stock item by ID"""
+    try:
+        res = requests.get(f"{API_URL}/estoque/{item_id}")
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        return None
+
+def update_stock_quantity(item_id: str, quantidade: int, operacao: str = "set"):
+    """
+    Update stock quantity.
+    operacao: 'set' (define value), 'add' (sum), 'subtract' (subtract)
+    """
+    try:
+        res = requests.put(f"{API_URL}/estoque/{item_id}", json={
+            "quantidade": quantidade,
+            "operacao": operacao
+        })
+        return res
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        return None
+
+def delete_stock_item(item_id: str):
+    """Delete a stock item"""
+    try:
+        res = requests.delete(f"{API_URL}/estoque/{item_id}")
+        return res
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        return None
+
+def check_stock_availability(nome: str):
+    """Check if item exists in catalog and stock"""
+    try:
+        res = requests.get(f"{API_URL}/estoque/verificar/{nome}")
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        return None
+
+def get_stock_stats():
+    """Get stock statistics"""
+    try:
+        res = requests.get(f"{API_URL}/estoque/stats/resumo")
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except Exception as e:
+        print(f"Erro de conexão: {e}")
+        return None

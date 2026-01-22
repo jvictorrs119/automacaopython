@@ -5,15 +5,41 @@ def format_order_confirmation(data):
 👤 *Cliente:* {data.get('nome_cliente', 'N/A')}
 📋 *Pedido:* {data.get('numero_pedido', 'N/A')}
 📅 *Data:* {data.get('data_pedido', 'N/A')}
-🚚 *Entrega:* {data.get('data_entrega', 'N/A')}
+🚚 *Previsão de Entrega:* {data.get('previsao_entrega', 'N/A')}
 💰 *Valor:* R$ {data.get('preco_total', 0):.2f}
 💸 *ICMS:* {data.get('icms', 'N/A')}
 
 Deseja confirmar a criação deste pedido? (Sim/Não)"""
 
+def format_order_created_success(codigo_op, pecas=None):
+    """Template for order creation success with optional parts detected"""
+    msg = f"""✅ *Ordem (OP) criada com sucesso!*
+
+🏭 *Código da OP:* `{codigo_op}`"""
+    
+    if pecas and len(pecas) > 0:
+        msg += "\n\n📦 *Peças identificadas na sua mensagem:*\n\n"
+        for i, p in enumerate(pecas, start=1):
+            qtd = p.get('quantidade', 0)
+            nome = p.get('nome_peca', 'N/A')
+            preco = p.get('preco_unitario', 0)
+            if preco:
+                msg += f"**{i}.** {qtd}x *{nome}* - R$ {preco:.2f}\n"
+            else:
+                msg += f"**{i}.** {qtd}x *{nome}*\n"
+        
+        msg += """
+🔄 Deseja cadastrar essas peças agora? (Sim/Não)"""
+    else:
+        msg += """
+
+📦 Deseja cadastrar as peças para este pedido agora? (Sim/Não)"""
+    
+    return msg
+
 def format_parts_confirmation(client_name, op_code, parts):
     """Template for confirming parts addition"""
-    parts_list = "\n".join([f"• {p['quantidade']}x {p['nome_peca']} - R$ {p.get('preco_unitario', 0):.2f}" for p in parts])
+    parts_list = "\n".join([f"**{i}.** {p['quantidade']}x {p['nome_peca']} - R$ {p.get('preco_unitario', 0):.2f}" for i, p in enumerate(parts, start=1)])
     
     return f"""📦 *Confirmar Adição de Peças*
 
